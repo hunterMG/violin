@@ -72,13 +72,8 @@ def resolve_reference(source: Path, reference: str) -> Path:
     raise ValueError(f"source is not inside skills/pentest: {source}")
 
 
-def check_release() -> ReleaseCheckResult:
-    """Run all release gate checks. This is a REAL gate — failures add errors
-    and cause a non-zero exit code (see CLI cmd_check_release)."""
-    result = ReleaseCheckResult()
-    root = _plugin_root()
-
-    # 1. plugin.yaml version
+def _check_manifest_and_changelog(root: Path, result: ReleaseCheckResult) -> list[str]:
+    """Check plugin.yaml version format and CHANGELOG.md presence."""
     plugin_yaml = root / "plugin.yaml"
     provides_tools: list[str] = []
     if plugin_yaml.exists():
@@ -94,16 +89,22 @@ def check_release() -> ReleaseCheckResult:
     else:
         result.add_error("plugin.yaml not found")
 
-    # 2. CHANGELOG.md
     changelog = root.parent.parent / "CHANGELOG.md"
     if changelog.exists():
         result.add_info("CHANGELOG.md present")
     else:
         result.add_warning("CHANGELOG.md not found")
 
-    # 3. Isolated plugin import (catches broken module-level code / imports).
+    return provides_tools
+
+
+def _check_isolated_import_and_tools(
+    root: Path, provides_tools: list[str], result: ReleaseCheckResult
+) -> None:
+    """Verify isolated plugin import and manifest vs registered tools match."""
     module_name = "violin_guard_release_check"
     old_module = sys.modules.get(module_name)
+    mod = None
     try:
         sys.path.insert(0, str(root.parent))
         spec = importlib.util.spec_from_file_location(
@@ -119,7 +120,6 @@ def check_release() -> ReleaseCheckResult:
         result.add_info("isolated plugin import OK")
     except Exception as exc:  # noqa: BLE001
         result.add_error(f"plugin import failed: {type(exc).__name__}: {exc}")
-        mod = None
     finally:
         sys.path.pop(0)
         if old_module is None:
@@ -127,7 +127,6 @@ def check_release() -> ReleaseCheckResult:
         else:
             sys.modules[module_name] = old_module
 
-    # 3b. Manifest vs registered tools.
     if mod is not None:
         registered = sorted(getattr(mod, "REGISTERED_TOOLS", []) or [])
         if not registered:
@@ -140,7 +139,9 @@ def check_release() -> ReleaseCheckResult:
         else:
             result.add_info("provides_tools matches registered tools")
 
-    # 3c. Checked-in external-skill dependency manifest is deterministic.
+
+def _check_skill_snapshot(root: Path, result: ReleaseCheckResult) -> None:
+    """Verify checked-in external-skill dependency manifest against approved catalog."""
     snapshot_path = root.parent.parent / "skills.snapshot.json"
     catalog_errors = validate_catalog()
     if catalog_errors:
@@ -162,64 +163,63 @@ def check_release() -> ReleaseCheckResult:
         except (OSError, json.JSONDecodeError) as exc:
             result.add_error(f"skills.snapshot.json is invalid: {exc}")
 
-    # 4. Heavy checks (ruff + pytest), opt-out via env.
-    if os.environ.get("VIOLIN_CHECK_RELEASE_SKIP_HEAVY") != "1":
-        repo_path = root.parent.parent
-        repo_root = str(repo_path)
-        python = _project_python(repo_path)
-        try:
-            ruff = subprocess.run(
-                [python, "-m", "ruff", "check", "."],
-                cwd=repo_root,
-                capture_output=True,
-                text=True,
-            )
-            if ruff.returncode != 0:
-                result.add_error(
-                    "ruff check failed:\n" + (ruff.stdout or ruff.stderr).strip()[:2000]
-                )
-            else:
-                result.add_info("ruff check passed")
-        except FileNotFoundError:
-            result.add_warning("ruff not installed; skipped")
-        basetemp = _pytest_basetemp(repo_path)
-        try:
-            pytest = subprocess.run(
-                [
-                    python,
-                    "-m",
-                    "pytest",
-                    "-q",
-                    "-p",
-                    "no:cacheprovider",
-                    "--basetemp",
-                    basetemp,
-                ],
-                cwd=repo_root,
-                capture_output=True,
-                text=True,
-            )
-            if pytest.returncode != 0:
-                result.add_error(
-                    "test suite failed:\n" + (pytest.stdout or pytest.stderr).strip()[:2000]
-                )
-            else:
-                result.add_info("test suite passed")
-        except FileNotFoundError:
-            result.add_warning("pytest not installed; skipped")
-        finally:
-            shutil.rmtree(basetemp, ignore_errors=True)
-    else:
+
+def _check_heavy_linter_and_tests(root: Path, result: ReleaseCheckResult) -> None:
+    """Execute ruff and pytest heavy release gates unless opted out via env."""
+    if os.environ.get("VIOLIN_CHECK_RELEASE_SKIP_HEAVY") == "1":
         result.add_info("heavy checks skipped (VIOLIN_CHECK_RELEASE_SKIP_HEAVY=1)")
+        return
 
-    # 5. Tests directory
-    tests_dir = root.parent.parent / "tests"
-    if tests_dir.exists():
-        result.add_info(f"tests directory found: {tests_dir}")
-    else:
-        result.add_warning("tests directory not found")
+    repo_path = root.parent.parent
+    repo_root = str(repo_path)
+    python = _project_python(repo_path)
+    try:
+        ruff = subprocess.run(
+            [python, "-m", "ruff", "check", "."],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+        )
+        if ruff.returncode != 0:
+            result.add_error(
+                "ruff check failed:\n" + (ruff.stdout or ruff.stderr).strip()[:2000]
+            )
+        else:
+            result.add_info("ruff check passed")
+    except FileNotFoundError:
+        result.add_warning("ruff not installed; skipped")
 
-    # 6. Skill documentation staleness scan.
+    basetemp = _pytest_basetemp(repo_path)
+    try:
+        pytest = subprocess.run(
+            [
+                python,
+                "-m",
+                "pytest",
+                "-q",
+                "-p",
+                "no:cacheprovider",
+                "--basetemp",
+                basetemp,
+            ],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+        )
+        if pytest.returncode != 0:
+            result.add_error(
+                "test suite failed:\n" + (pytest.stdout or pytest.stderr).strip()[:2000]
+            )
+        else:
+            result.add_info("test suite passed")
+    except FileNotFoundError:
+        result.add_warning("pytest not installed; skipped")
+    finally:
+        shutil.rmtree(basetemp, ignore_errors=True)
+
+
+def _check_stale_skill_docs(root: Path, result: ReleaseCheckResult) -> None:
+    """Scan skill documentation for stale or deprecated guard surface references."""
     profile_root = root.parent.parent
     skills_root = profile_root / "skills"
     forbidden = {
@@ -233,20 +233,41 @@ def check_release() -> ReleaseCheckResult:
         "sync-clear": "nonexistent sync-clear subcommand",
         "validate_scope_data": "private legacy scope validator",
     }
-    if skills_root.exists():
-        docs = [*skills_root.rglob("*.md"), *skills_root.rglob("*.yaml")]
-        for doc in docs:
-            try:
-                text = doc.read_text(encoding="utf-8")
-            except Exception:
-                continue
-            for token, reason in forbidden.items():
-                if token in text:
-                    result.add_error(
-                        f"stale skill reference in {doc.relative_to(profile_root)}: "
-                        f"{token!r} ({reason})"
-                    )
-        if not any("stale skill reference" in e for e in result.errors):
-            result.add_info("skill documentation matches the current guard surface")
+    if not skills_root.exists():
+        return
 
+    docs = [*skills_root.rglob("*.md"), *skills_root.rglob("*.yaml")]
+    for doc in docs:
+        try:
+            text = doc.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        for token, reason in forbidden.items():
+            if token in text:
+                result.add_error(
+                    f"stale skill reference in {doc.relative_to(profile_root)}: "
+                    f"{token!r} ({reason})"
+                )
+    if not any("stale skill reference" in e for e in result.errors):
+        result.add_info("skill documentation matches the current guard surface")
+
+
+def check_release() -> ReleaseCheckResult:
+    """Run all release gate checks. This is a REAL gate — failures add errors
+    and cause a non-zero exit code (see CLI cmd_check_release)."""
+    result = ReleaseCheckResult()
+    root = _plugin_root()
+
+    provides_tools = _check_manifest_and_changelog(root, result)
+    _check_isolated_import_and_tools(root, provides_tools, result)
+    _check_skill_snapshot(root, result)
+    _check_heavy_linter_and_tests(root, result)
+
+    tests_dir = root.parent.parent / "tests"
+    if tests_dir.exists():
+        result.add_info(f"tests directory found: {tests_dir}")
+    else:
+        result.add_warning("tests directory not found")
+
+    _check_stale_skill_docs(root, result)
     return result
