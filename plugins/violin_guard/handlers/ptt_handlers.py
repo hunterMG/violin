@@ -73,7 +73,13 @@ def _task_row_contains(path: Path, task_id: str, marker: str) -> bool:
     return False
 
 
-def _validate_review_batch(a: dict, pending: dict) -> dict:
+def _validate_review_identity(
+    a: dict, pending: dict
+) -> tuple[str, str, str, str, str, str]:
+    """Extract and validate core identity fields from a review request.
+
+    Returns (eng_dir, task_id, note, status, batch_id, captured_task).
+    """
     eng_dir = str(a.get("eng_dir") or "")
     task_id = str(a.get("id") or "").strip()
     note = str(a.get("note") or "").strip()
@@ -89,7 +95,16 @@ def _validate_review_batch(a: dict, pending: dict) -> dict:
         raise ValueError("pending batch is missing its batch or PTT task identity")
     if task_id != captured_task:
         raise ValueError(f"reviewed task {task_id!r} does not match batch task {captured_task!r}")
+    return eng_dir, task_id, note, status, batch_id, captured_task
 
+
+def _validate_review_ptt_state(
+    eng_dir: str, task_id: str, status: str, batch_id: str, pending: dict
+) -> tuple[Path, str, bool]:
+    """Verify the PTT is in a valid state for batch review.
+
+    Returns (ptt_path, marker, already_recorded).
+    """
     ptt_path = _eng_path(eng_dir) / "state" / "ptt.md"
     tasks = ptt.parse_ptt(ptt_path)
     selected = next((item for item in tasks if item.id == task_id), None)
@@ -115,7 +130,11 @@ def _validate_review_batch(a: dict, pending: dict) -> dict:
             raise ValueError(
                 f"batch task {task_id!r} is not phase-compatible with " + ", ".join(incompatible)
             )
+    return ptt_path, marker, already_recorded
 
+
+def _validate_review_history(eng_dir: str, pending: dict) -> None:
+    """Ensure every pending command has been recorded in the execution history."""
     for item in pending.get("commands") or []:
         command = str(item.get("command") or "") if isinstance(item, dict) else str(item or "")
         if command and not history_contains(eng_dir, command):
@@ -126,21 +145,38 @@ def _validate_review_batch(a: dict, pending: dict) -> dict:
                 "wait for execution completion before review"
             )
 
-    finding = a.get("finding")
-    if finding is not None:
-        if not isinstance(finding, dict):
-            raise ValueError("finding must be an object when supplied")
-        findings._validate_from_pending_batch(
-            eng_dir,
-            pending,
-            title=str(finding.get("title") or ""),
-            severity=str(finding.get("severity") or ""),
-            description=str(finding.get("description") or ""),
-            impact=str(finding.get("impact") or ""),
-            remediation=str(finding.get("remediation") or ""),
-            finding_id=str(finding.get("finding_id") or ""),
-            hypothesis_id=str(finding.get("hypothesis_id") or ""),
-        )
+
+def _validate_review_finding(eng_dir: str, pending: dict, finding) -> None:
+    """Validate an optional finding payload against the pending batch."""
+    if finding is None:
+        return
+    if not isinstance(finding, dict):
+        raise ValueError("finding must be an object when supplied")
+    findings._validate_from_pending_batch(
+        eng_dir,
+        pending,
+        title=str(finding.get("title") or ""),
+        severity=str(finding.get("severity") or ""),
+        description=str(finding.get("description") or ""),
+        impact=str(finding.get("impact") or ""),
+        remediation=str(finding.get("remediation") or ""),
+        finding_id=str(finding.get("finding_id") or ""),
+        hypothesis_id=str(finding.get("hypothesis_id") or ""),
+    )
+
+
+def _validate_review_batch(a: dict, pending: dict) -> dict:
+    """Validate all preconditions for a batch review.
+
+    Delegates to focused sub-validators for identity, PTT state, command
+    history, and optional finding validation.
+    """
+    eng_dir, task_id, note, status, batch_id, _ = _validate_review_identity(a, pending)
+    ptt_path, marker, already_recorded = _validate_review_ptt_state(
+        eng_dir, task_id, status, batch_id, pending
+    )
+    _validate_review_history(eng_dir, pending)
+    _validate_review_finding(eng_dir, pending, a.get("finding"))
     return {
         "batch_id": batch_id,
         "task_id": task_id,
@@ -149,7 +185,7 @@ def _validate_review_batch(a: dict, pending: dict) -> dict:
         "marker": marker,
         "already_recorded": already_recorded,
         "ptt_path": ptt_path,
-        "finding": finding,
+        "finding": a.get("finding"),
     }
 
 
