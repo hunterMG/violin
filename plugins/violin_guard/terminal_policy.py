@@ -140,6 +140,45 @@ def _is_known_source_host(host: str) -> bool:
     )
 
 
+def _word_is_target_literal(word: str) -> bool:
+    """Inspect a single shell word token for an IP address, remote URL, or domain literal."""
+    value = word.strip("'\"()[]{}<>,")
+    authority = value.rsplit("@", 1)[-1]
+    if authority.count(":") == 1:
+        authority = authority.split(":", 1)[0]
+
+    # IPv4 match
+    if _IPV4_RE.fullmatch(authority):
+        return authority not in {"127.0.0.1", "0.0.0.0"}
+
+    # IPv6 match
+    with contextlib.suppress(ValueError):
+        clean_ip = authority.strip("[]")
+        ip_obj = ipaddress.ip_address(clean_ip)
+        return not ip_obj.is_loopback and not ip_obj.is_unspecified
+
+    # URL match
+    if "://" in value:
+        try:
+            hostname = urlsplit(value).hostname
+            return bool(
+                hostname
+                and hostname.lower() not in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+            )
+        except ValueError:
+            return True
+
+    # Paths and ordinary local scripts are not host literals
+    if "/" in value or "\\" in value or value.startswith("."):
+        return False
+    if authority.lower() in {"localhost"}:
+        return False
+    if any(value.lower().endswith(suffix) for suffix in _LOCAL_FILE_SUFFIXES):
+        return False
+
+    return bool(_DOMAIN_RE.fullmatch(authority))
+
+
 def _has_target_literal(command: str) -> bool:
     """Inspect shell arguments, not arbitrary source code or file paths."""
     for segment in _COMMAND_SPLIT_RE.split(command):
@@ -153,45 +192,11 @@ def _has_target_literal(command: str) -> bool:
             and executable not in _SHELL_WRAPPERS
             and "-c" in words
         )
+        c_index = words.index("-c") if skip_code else -1
         for index, word in enumerate(words):
-            if skip_code and index > words.index("-c"):
+            if skip_code and index > c_index:
                 continue
-            value = word.strip("'\"()[]{}<>,")
-            authority = value.rsplit("@", 1)[-1]
-            if authority.count(":") == 1:
-                authority = authority.split(":", 1)[0]
-            if _IPV4_RE.fullmatch(authority):
-                if authority in {"127.0.0.1", "0.0.0.0"}:
-                    continue
-                return True
-            with contextlib.suppress(ValueError):
-                clean_ip = authority.strip("[]")
-                ip_obj = ipaddress.ip_address(clean_ip)
-                if not ip_obj.is_loopback and not ip_obj.is_unspecified:
-                    return True
-                continue
-            if "://" in value:
-                try:
-                    hostname = urlsplit(value).hostname
-                    if hostname and hostname.lower() not in {
-                        "localhost",
-                        "127.0.0.1",
-                        "0.0.0.0",
-                        "::1",
-                    }:
-                        return True
-                except ValueError:
-                    return True
-                continue
-            # Paths and ordinary local scripts are not host literals.  A bare
-            # hostname remains meaningful for commands such as `ping host`.
-            if "/" in value or "\\" in value or value.startswith("."):
-                continue
-            if authority.lower() in {"localhost"}:
-                continue
-            if any(value.lower().endswith(suffix) for suffix in _LOCAL_FILE_SUFFIXES):
-                continue
-            if _DOMAIN_RE.fullmatch(authority):
+            if _word_is_target_literal(word):
                 return True
     return False
 
