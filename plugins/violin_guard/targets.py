@@ -159,6 +159,43 @@ def normalise_target(value: str) -> str:
     return raw.lower()
 
 
+def _resolve_by_role(targets_sec: dict, role: str) -> str | None:
+    """Resolve target by explicit role key."""
+    roles = targets_sec.get("roles", {}) or {}
+    role_val = roles.get(role)
+    if isinstance(role_val, list) and role_val:
+        return str(role_val[0]).strip()
+    if role_val is not None:
+        return str(role_val).strip()
+    return None
+
+
+def _resolve_by_host_query(scope_data: dict, host_query: str) -> str | None:
+    """Resolve target by matching host query against allowed scope hosts."""
+    allowed_hosts = scope_hosts(scope_data)
+    norm_host = normalise_target(host_query)
+    if norm_host in allowed_hosts:
+        return host_query.strip()
+    return None
+
+
+def _resolve_by_fallback(targets_sec: dict) -> str | None:
+    """Resolve target via fallback chain: ip_addresses -> urls -> domains -> hostnames -> roles."""
+    for key in ("ip_addresses", "urls", "in_scope_urls", "domains", "hostnames"):
+        items = targets_sec.get(key, [])
+        if isinstance(items, list) and items:
+            return str(items[0]).strip()
+
+    roles = targets_sec.get("roles", {}) or {}
+    if roles:
+        first_val = next(iter(roles.values()))
+        if isinstance(first_val, list) and first_val:
+            return str(first_val[0]).strip()
+        if first_val is not None:
+            return str(first_val).strip()
+    return None
+
+
 def resolve_target(
     scope_data: dict[str, Any],
     role: str | None,
@@ -176,40 +213,14 @@ def resolve_target(
     target is found.
     """
     targets_sec = scope_data.get("targets", {}) or {}
-    target_val: str | None = None
 
-    # 1. Resolve by role
-    if role:
-        roles = targets_sec.get("roles", {}) or {}
-        role_val = roles.get(role)
-        if isinstance(role_val, list) and role_val:
-            target_val = str(role_val[0]).strip()
-        elif role_val is not None:
-            target_val = str(role_val).strip()
+    target_val = _resolve_by_role(targets_sec, role) if role else None
 
-    # 2. Resolve by host query
     if not target_val and host_query:
-        allowed_hosts = scope_hosts(scope_data)
-        norm_host = normalise_target(host_query)
-        if norm_host in allowed_hosts:
-            target_val = host_query.strip()
+        target_val = _resolve_by_host_query(scope_data, host_query)
 
-    # 3. Fallback chain: ip_addresses -> urls/in_scope_urls -> domains -> hostnames -> roles
     if not target_val:
-        for key in ("ip_addresses", "urls", "in_scope_urls", "domains", "hostnames"):
-            items = targets_sec.get(key, [])
-            if isinstance(items, list) and items:
-                target_val = str(items[0]).strip()
-                break
-
-        if not target_val:
-            roles = targets_sec.get("roles", {}) or {}
-            if roles:
-                first_val = next(iter(roles.values()))
-                if isinstance(first_val, list) and first_val:
-                    target_val = str(first_val[0]).strip()
-                elif first_val is not None:
-                    target_val = str(first_val).strip()
+        target_val = _resolve_by_fallback(targets_sec)
 
     if not target_val:
         return None
