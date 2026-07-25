@@ -375,10 +375,124 @@ def handle_record_ptt(a, **kwargs):
     )
 
 
+def _handle_review_batch_skill_reservation(
+    engagement: Path, pending: dict, a: dict, skill: str
+) -> tuple[dict, str | None]:
+    """Handle skill reservation and review readiness for batch reviews.
+
+    Returns (updated_a, early_response_json_or_None).
+    """
+    tasks = ptt.parse_ptt(engagement / "state" / "ptt.md")
+    task_id = str(a.get("id") or "").strip()
+    task = next((item for item in tasks if item.id == task_id), None)
+    if task is None:
+        raise ValueError(f"batch task {task_id!r} is missing from the PTT")
+    hypothesis_id = str(a.get("hypothesis_id") or "").strip()
+    phase = ptt.normalize_phase(task.phase)
+    if requires_hypothesis(phase) and not hypothesis_id:
+        raise ValueError(f"hypothesis_id is required for {phase.value} batch review")
+    digest = "sha256:" + hashlib.sha256(f"policy:{skill}".encode()).hexdigest()
+    reservation = prepare_delivery(
+        engagement,
+        session_id=state.resolve_session_id(engagement) or "review",
+        skill=skill,
+        bundle_digest=digest,
+        phase="RETROSPECTIVE" if skill == "fp-check" else phase.value,
+    )
+    if reservation.owner:
+        adapter_cls = _get_skill_view_adapter()
+        viewed = adapter_cls().view(skill, task_id=task_id)
+        completed = complete_delivery(engagement, reservation, viewed)
+        return a, _json(
+            "skill_prepared" if completed.status == "delivered" else "skill_unavailable",
+            transition_applied=False,
+            released=False,
+            skill={
+                "name": skill,
+                "digest": digest,
+                "content": viewed.content,
+                "error": viewed.error,
+                "delivery_id": reservation.id,
+            },
+        )
+    if reservation.status == "preparing":
+        return a, _json("skill_preparing", transition_applied=False, released=False)
+    if skill == "fp-check" and a.get("finding"):
+        finding_id = str((a.get("finding") or {}).get("finding_id") or "").upper()
+        evidence = findings._batch_evidence(engagement, pending)
+        evidence_digest = (
+            "sha256:" + hashlib.sha256("\n".join(sorted(evidence)).encode()).hexdigest()
+        )
+        prepare_review_readiness(
+            engagement,
+            finding_id=finding_id,
+            evidence_digest=evidence_digest,
+            delivery_id=reservation.id,
+        )
+        return a, _json(
+            "review_prepared",
+            transition_applied=False,
+            released=False,
+            finding_id=finding_id,
+        )
+    updated_a = {**a, "note": _with_skill_token(str(a.get("note") or ""), skill, digest)}
+    return updated_a, None
+
+
+def _execute_batch_review(engagement: Path, pending: dict, a: dict, skill: str) -> str:
+    """Validate and execute the core batch review transition."""
+    context = _validate_review_batch(a, pending)
+    finding_result = None
+    finding = context["finding"]
+    if finding is not None:
+        finding_result = findings._create_from_pending_batch(
+            engagement,
+            pending=pending,
+            title=str(finding.get("title") or ""),
+            severity=str(finding.get("severity") or ""),
+            description=str(finding.get("description") or ""),
+            impact=str(finding.get("impact") or ""),
+            remediation=str(finding.get("remediation") or ""),
+            finding_id=str(finding.get("finding_id") or ""),
+            hypothesis_id=str(finding.get("hypothesis_id") or ""),
+        )
+    if not context["already_recorded"]:
+        review_note = f"{context['note']} {context['marker']}"
+        ptt.update_task(
+            context["ptt_path"], context["task_id"], context["status"], review_note
+        )
+    batch_evidence = findings._batch_evidence(engagement, pending)
+    supplied_evidence = [str(item) for item in (a.get("evidence_paths") or [])]
+    evidence_paths = sorted(set(supplied_evidence) | set(batch_evidence))
+    semantic = state.record_semantic_review(
+        engagement,
+        task_id=context["task_id"],
+        hypothesis_id=str(a.get("hypothesis_id") or ""),
+        skill=skill or "review",
+        technique=str(a.get("technique") or "batch-review"),
+        outcome=str(a.get("outcome") or "progress"),
+        evidence_paths=evidence_paths,
+        next_action=str(a.get("next_action") or "review evidence"),
+        next_technique=str(a.get("next_technique") or ""),
+        research_attempted=bool(a.get("research_attempted")),
+    )
+    state.clear_pending_sync(engagement)
+    return _json(
+        "ok",
+        batch_id=context["batch_id"],
+        task_id=context["task_id"],
+        task_status=context["status"],
+        released=True,
+        finding=finding_result,
+        finding_path=finding_result.get("path") if finding_result else None,
+        binding_task_id=None,
+        semantic_progress=semantic,
+    )
+
+
 @_serialise_errors
 def handle_review_batch(a, **kwargs):
     """Review one completed batch, optionally record a finding, and release its lock."""
-
     eng_dir = str(a.get("eng_dir") or "").strip()
     if not eng_dir:
         raise ValueError("eng_dir is required")
@@ -400,109 +514,12 @@ def handle_review_batch(a, **kwargs):
                 )
             skill = str(a.get("skill") or "").strip()
             if skill:
-                tasks = ptt.parse_ptt(engagement / "state" / "ptt.md")
-                task_id = str(a.get("id") or "").strip()
-                task = next((item for item in tasks if item.id == task_id), None)
-                if task is None:
-                    raise ValueError(f"batch task {task_id!r} is missing from the PTT")
-                hypothesis_id = str(a.get("hypothesis_id") or "").strip()
-                phase = ptt.normalize_phase(task.phase)
-                if requires_hypothesis(phase) and not hypothesis_id:
-                    raise ValueError(f"hypothesis_id is required for {phase.value} batch review")
-                digest = "sha256:" + hashlib.sha256(f"policy:{skill}".encode()).hexdigest()
-                reservation = prepare_delivery(
-                    engagement,
-                    session_id=state.resolve_session_id(engagement) or "review",
-                    skill=skill,
-                    bundle_digest=digest,
-                    phase="RETROSPECTIVE" if skill == "fp-check" else phase.value,
+                a, early_response = _handle_review_batch_skill_reservation(
+                    engagement, pending, a, skill
                 )
-                if reservation.owner:
-                    adapter_cls = _get_skill_view_adapter()
-                    viewed = adapter_cls().view(skill, task_id=task_id)
-                    completed = complete_delivery(engagement, reservation, viewed)
-                    return _json(
-                        "skill_prepared"
-                        if completed.status == "delivered"
-                        else "skill_unavailable",
-                        transition_applied=False,
-                        released=False,
-                        skill={
-                            "name": skill,
-                            "digest": digest,
-                            "content": viewed.content,
-                            "error": viewed.error,
-                            "delivery_id": reservation.id,
-                        },
-                    )
-                if reservation.status == "preparing":
-                    return _json("skill_preparing", transition_applied=False, released=False)
-                if skill == "fp-check" and a.get("finding"):
-                    finding_id = str((a.get("finding") or {}).get("finding_id") or "").upper()
-                    evidence = findings._batch_evidence(engagement, pending)
-                    evidence_digest = (
-                        "sha256:" + hashlib.sha256("\n".join(sorted(evidence)).encode()).hexdigest()
-                    )
-                    prepare_review_readiness(
-                        engagement,
-                        finding_id=finding_id,
-                        evidence_digest=evidence_digest,
-                        delivery_id=reservation.id,
-                    )
-                    return _json(
-                        "review_prepared",
-                        transition_applied=False,
-                        released=False,
-                        finding_id=finding_id,
-                    )
-                a = {**a, "note": _with_skill_token(str(a.get("note") or ""), skill, digest)}
-            context = _validate_review_batch(a, pending)
-            finding_result = None
-            finding = context["finding"]
-            if finding is not None:
-                finding_result = findings._create_from_pending_batch(
-                    engagement,
-                    pending=pending,
-                    title=str(finding.get("title") or ""),
-                    severity=str(finding.get("severity") or ""),
-                    description=str(finding.get("description") or ""),
-                    impact=str(finding.get("impact") or ""),
-                    remediation=str(finding.get("remediation") or ""),
-                    finding_id=str(finding.get("finding_id") or ""),
-                    hypothesis_id=str(finding.get("hypothesis_id") or ""),
-                )
-            if not context["already_recorded"]:
-                review_note = f"{context['note']} {context['marker']}"
-                ptt.update_task(
-                    context["ptt_path"], context["task_id"], context["status"], review_note
-                )
-            batch_evidence = findings._batch_evidence(engagement, pending)
-            supplied_evidence = [str(item) for item in (a.get("evidence_paths") or [])]
-            evidence_paths = sorted(set(supplied_evidence) | set(batch_evidence))
-            semantic = state.record_semantic_review(
-                engagement,
-                task_id=context["task_id"],
-                hypothesis_id=str(a.get("hypothesis_id") or ""),
-                skill=skill or "review",
-                technique=str(a.get("technique") or "batch-review"),
-                outcome=str(a.get("outcome") or "progress"),
-                evidence_paths=evidence_paths,
-                next_action=str(a.get("next_action") or "review evidence"),
-                next_technique=str(a.get("next_technique") or ""),
-                research_attempted=bool(a.get("research_attempted")),
-            )
-            state.clear_pending_sync(engagement)
-            return _json(
-                "ok",
-                batch_id=context["batch_id"],
-                task_id=context["task_id"],
-                task_status=context["status"],
-                released=True,
-                finding=finding_result,
-                finding_path=finding_result.get("path") if finding_result else None,
-                binding_task_id=None,
-                semantic_progress=semantic,
-            )
+                if early_response is not None:
+                    return early_response
+            return _execute_batch_review(engagement, pending, a, skill)
     except (OSError, ValueError) as exc:
         return _json(
             "blocked",
