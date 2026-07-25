@@ -201,14 +201,10 @@ def _get_skill_view_adapter():
     return HermesSkillViewAdapter
 
 
-@_serialise_errors
-def handle_record_ptt(a, **kwargs):
-    eng_dir = a["eng_dir"]
-    doc = ptt.parse_ptt(_eng_path(eng_dir) / "state" / "ptt.md")
-    pending = state.get_pending_sync(eng_dir)
+def _validate_record_ptt_inputs(a: dict, doc: list, pending: dict | None):
+    """Validate preconditions and return normalized phase and hypothesis details."""
     task = a.get("id")
     note = (a.get("note") or "").strip()
-    status = a.get("status", "[~]")
     skill = str(a.get("skill") or "").strip()
     technique = str(a.get("technique") or "").strip()
 
@@ -229,6 +225,7 @@ def handle_record_ptt(a, **kwargs):
     hypothesis_id = str(a.get("hypothesis_id") or "").strip()
     if requires_hypothesis(phase) and not hypothesis_id:
         raise ValueError(f"hypothesis_id is required for {phase.value} PTT work")
+
     vulnerability_class = ""
     candidate_source = ""
     if hypothesis_id:
@@ -236,13 +233,26 @@ def handle_record_ptt(a, **kwargs):
         matched = next(
             (
                 h
-                for h in hypotheses.parse_hypotheses(_eng_path(eng_dir) / "hypotheses.md")
+                for h in hypotheses.parse_hypotheses(_eng_path(a["eng_dir"]) / "hypotheses.md")
                 if h.id.lstrip("0") == normalized
             ),
             None,
         )
         vulnerability_class = matched.vuln_class if matched else ""
         candidate_source = matched.candidate_source if matched else ""
+
+    return task, note, skill, technique, phase, hypothesis_id, vulnerability_class, candidate_source
+
+
+def _prepare_record_ptt_delivery(
+    eng_dir: str,
+    task: str,
+    skill: str,
+    phase: ptt.Phase,
+    vulnerability_class: str,
+    candidate_source: str,
+):
+    """Prepare skill delivery reservation and return (reservation, early_response_or_None)."""
     digest = "sha256:" + hashlib.sha256(f"policy:{skill}".encode()).hexdigest()
     reservation = prepare_delivery(
         eng_dir,
@@ -257,7 +267,7 @@ def handle_record_ptt(a, **kwargs):
         adapter_cls = _get_skill_view_adapter()
         viewed = adapter_cls().view(skill, task_id=task)
         completed = complete_delivery(eng_dir, reservation, viewed)
-        return _json(
+        early_resp = _json(
             "skill_prepared" if completed.status == "delivered" else "skill_unavailable",
             transition_applied=False,
             skill={
@@ -268,27 +278,36 @@ def handle_record_ptt(a, **kwargs):
                 "delivery_id": reservation.id,
             },
         )
+        return reservation, digest, early_resp
     if reservation.status == "preparing":
-        return _json(
+        early_resp = _json(
             "skill_preparing", transition_applied=False, skill={"name": skill, "digest": digest}
         )
-    binding = bind_task(
-        eng_dir,
-        task_id=task,
-        delivery_id=reservation.id,
-        hypothesis_id=hypothesis_id,
-        technique=technique,
-    )
-    note = _with_skill_token(note, skill, digest)
+        return reservation, digest, early_resp
+    return reservation, digest, None
+
+
+def _apply_ptt_task_transition(
+    eng_dir: str,
+    doc: list,
+    task: str,
+    status: str,
+    note: str,
+    binding: dict,
+    title: str | None = None,
+    raw_phase: str | None = None,
+):
+    """Apply PTT state mutations and return final JSON response."""
+    ptt_file = _eng_path(eng_dir) / "state" / "ptt.md"
     if not any(item.id == task for item in doc):
         created = ptt.create_task(
-            _eng_path(eng_dir) / "state" / "ptt.md",
+            ptt_file,
             task,
-            a.get("title") or task,
-            a.get("phase") or "RECON",
+            title or task,
+            raw_phase or "RECON",
             note,
         )
-        doc = ptt.parse_ptt(_eng_path(eng_dir) / "state" / "ptt.md")
+        doc = ptt.parse_ptt(ptt_file)
         if status == "[ ]":
             return _json("ok", task_id=created.id, task_created=True)
     existing = next((item for item in doc if item.id == task), None)
@@ -301,18 +320,58 @@ def handle_record_ptt(a, **kwargs):
                     "an active PTT task already exists; review its pending batch first"
                 )
             superseded_note = f"{active.note} [superseded-by:{task}]".strip()
-            ptt.update_task(
-                _eng_path(eng_dir) / "state" / "ptt.md", active.id, "[x]", superseded_note
-            )
-        ptt.update_task(_eng_path(eng_dir) / "state" / "ptt.md", task, "[~]", note)
+            ptt.update_task(ptt_file, active.id, "[x]", superseded_note)
+        ptt.update_task(ptt_file, task, "[~]", note)
         return _json("ok", task_id=task, task_refreshed=True, binding=binding)
     if existing and status in {"[x]", "[-]"}:
         if existing.status != "[~]":
             raise ValueError("only the active [~] task may be closed outside a batch")
-        ptt.update_task(_eng_path(eng_dir) / "state" / "ptt.md", task, status, note)
+        ptt.update_task(ptt_file, task, status, note)
         return _json("ok", task_id=task, task_closed=True)
-    return _start_ptt_task(
-        _eng_path(eng_dir) / "state" / "ptt.md", doc, task, status, note, eng_dir=eng_dir
+    return _start_ptt_task(ptt_file, doc, task, status, note, eng_dir=eng_dir)
+
+
+@_serialise_errors
+def handle_record_ptt(a, **kwargs):
+    eng_dir = a["eng_dir"]
+    doc = ptt.parse_ptt(_eng_path(eng_dir) / "state" / "ptt.md")
+    pending = state.get_pending_sync(eng_dir)
+    status = a.get("status", "[~]")
+
+    (
+        task,
+        note,
+        skill,
+        technique,
+        phase,
+        hypothesis_id,
+        vuln_class,
+        cand_source,
+    ) = _validate_record_ptt_inputs(a, doc, pending)
+
+    reservation, digest, early_response = _prepare_record_ptt_delivery(
+        eng_dir, task, skill, phase, vuln_class, cand_source
+    )
+    if early_response is not None:
+        return early_response
+
+    binding = bind_task(
+        eng_dir,
+        task_id=task,
+        delivery_id=reservation.id,
+        hypothesis_id=hypothesis_id,
+        technique=technique,
+    )
+    note = _with_skill_token(note, skill, digest)
+    return _apply_ptt_task_transition(
+        eng_dir,
+        doc,
+        task,
+        status,
+        note,
+        binding,
+        title=a.get("title"),
+        raw_phase=a.get("phase"),
     )
 
 
