@@ -32,6 +32,9 @@ _PTT_RE = re.compile(
     r"\s*(?P<title>[^|]+?)\s*\|"
     r"\s*(?P<note>[^|]*?)\s*\|"
 )
+_PHASE_HEADING_RE = re.compile(r"^##\s+Phase:\s*(?P<phase>.+?)\s*$", re.IGNORECASE)
+_PAREN_SPLIT_RE = re.compile(r"\s*\(")
+_TASK_ID_RE = re.compile(r"PT-[\w-]+")
 
 # Canonical status tokens the guard accepts without a warning.
 _VALID_STATUSES = ("[ ]", "[~]", "[x]", "[!]", "[-]")
@@ -79,13 +82,13 @@ def parse_ptt(path: Path) -> list[PttTask]:
     tasks = []
     current_phase = ""
     for line in content.splitlines():
-        heading = re.match(r"^##\s+Phase:\s*(?P<phase>.+?)\s*$", line.strip(), re.IGNORECASE)
+        heading = _PHASE_HEADING_RE.match(line.strip())
         if heading:
             raw_phase = heading.group("phase").strip()
             # Human headings commonly add a parenthetical clarification.  The
             # phase token remains the first bare word, rather than becoming an
             # unmatchable value such as ``RECON_(WEB)``.
-            raw_phase = re.split(r"\s*\(", raw_phase, maxsplit=1)[0].strip()
+            raw_phase = _PAREN_SPLIT_RE.split(raw_phase, maxsplit=1)[0].strip()
             try:
                 current_phase = normalize_phase(raw_phase).value
             except ValueError:
@@ -201,7 +204,7 @@ def update_task(path: Path, task_id: str, status: str, note: str) -> PttTask:
 
 def create_task(path: Path, task_id: str, title: str, phase: str, note: str = "") -> PttTask:
     """Insert an explicitly requested untouched task into its canonical phase table."""
-    if not re.fullmatch(r"PT-[\w-]+", task_id):
+    if not _TASK_ID_RE.fullmatch(task_id):
         raise ValueError("task id must use the PT- prefix")
     canonical_phase = normalize_phase(phase).value
     tasks = parse_ptt(path)
@@ -211,10 +214,10 @@ def create_task(path: Path, task_id: str, title: str, phase: str, note: str = ""
     lines = content.splitlines()
     phase_heading_index = None
     for index, line in enumerate(lines):
-        match = re.match(r"^##\s+Phase:\s*(?P<phase>.+?)\s*$", line.strip(), re.IGNORECASE)
+        match = _PHASE_HEADING_RE.match(line.strip())
         if not match:
             continue
-        raw_phase = re.split(r"\s*\(", match.group("phase"), maxsplit=1)[0].strip()
+        raw_phase = _PAREN_SPLIT_RE.split(match.group("phase"), maxsplit=1)[0].strip()
         try:
             heading_phase = normalize_phase(raw_phase).value
         except ValueError:
@@ -239,7 +242,7 @@ def create_task(path: Path, task_id: str, title: str, phase: str, note: str = ""
         (
             index
             for index in range(phase_heading_index + 1, len(lines))
-            if re.match(r"^##\s+Phase:", lines[index].strip(), re.IGNORECASE)
+            if _PHASE_HEADING_RE.match(lines[index].strip())
         ),
         len(lines),
     )
