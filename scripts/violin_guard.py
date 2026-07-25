@@ -13,7 +13,7 @@ _PROFILE_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROFILE_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROFILE_ROOT))
 
-from plugins.violin_guard import bootstrap, command, state
+from plugins.violin_guard import bootstrap, command, handlers, state
 
 
 def _print_result(result) -> int:
@@ -56,10 +56,8 @@ def cmd_validate_scope(args: argparse.Namespace) -> int:
 
 
 def cmd_record_ptt(args: argparse.Namespace) -> int:
-    from plugins.violin_guard import service
-
     out = json.loads(
-        service.handle_record_ptt(
+        handlers.handle_record_ptt(
             {
                 "eng_dir": args.eng_dir,
                 "id": args.id,
@@ -73,8 +71,6 @@ def cmd_record_ptt(args: argparse.Namespace) -> int:
 
 
 def cmd_review_batch(args: argparse.Namespace) -> int:
-    from plugins.violin_guard import service
-
     finding = None
     finding_values = {
         "finding_id": args.finding_id,
@@ -87,7 +83,7 @@ def cmd_review_batch(args: argparse.Namespace) -> int:
     if any(str(value or "").strip() for value in finding_values.values()):
         finding = finding_values
     out = json.loads(
-        service.handle_review_batch(
+        handlers.handle_review_batch(
             {
                 "eng_dir": args.eng_dir,
                 "id": args.id,
@@ -102,10 +98,8 @@ def cmd_review_batch(args: argparse.Namespace) -> int:
 
 
 def cmd_rebind_pending_batch(args: argparse.Namespace) -> int:
-    from plugins.violin_guard import service
-
     out = json.loads(
-        service.handle_rebind_pending_batch(
+        handlers.handle_rebind_pending_batch(
             {
                 "eng_dir": args.eng_dir,
                 "batch_id": args.batch_id,
@@ -127,9 +121,7 @@ def cmd_heartbeat_done(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    from plugins.violin_guard import service
-
-    out = json.loads(service.handle_status({"eng_dir": args.eng_dir}))
+    out = json.loads(handlers.handle_status({"eng_dir": args.eng_dir}))
     if args.section == "skill":
         skill = out.get("skill", {})
         print(json.dumps(skill, indent=2))
@@ -139,8 +131,6 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_eng_root(args: argparse.Namespace) -> int:
-    from plugins.violin_guard import state
-
     eng_dir = args.eng_dir_option or args.eng_dir
     eng_root = state._eng_root()
     print(f"ENG_ROOT={eng_root}")
@@ -179,10 +169,8 @@ def cmd_search_exploit(args: argparse.Namespace) -> int:
 
 
 def cmd_target(args: argparse.Namespace) -> int:
-    from plugins.violin_guard import service
-
     out = json.loads(
-        service.handle_target(
+        handlers.handle_target(
             {
                 "eng_dir": args.eng_dir,
                 "scope": args.scope or "",
@@ -200,10 +188,8 @@ def cmd_target(args: argparse.Namespace) -> int:
 
 
 def cmd_exec_burst(args: argparse.Namespace) -> int:
-    from plugins.violin_guard import service
-
     out = json.loads(
-        service.handle_exec_burst(
+        handlers.handle_exec_burst(
             {
                 "eng_dir": args.eng_dir,
                 "scope": args.scope,
@@ -255,7 +241,9 @@ def main() -> int:
     p.add_argument("--host", default="")
     p.add_argument("--ctf", action="store_true", help="Create an HTB/CTF-ready scope and PTT")
     p.add_argument(
-        "--session-id", default="", help="Record the Hermes session ID for receipt-backed CTF bootstrap"
+        "--session-id",
+        default="",
+        help="Record the Hermes session ID for receipt-backed CTF bootstrap",
     )
     p.set_defaults(func=cmd_init_engagement)
 

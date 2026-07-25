@@ -18,10 +18,12 @@ from plugins.violin_guard import (  # noqa: E402
     bootstrap,
     execution,
     ptt,  # noqa: E402
-    service,  # noqa: E402
     state,
 )
-from plugins.violin_guard import service as tools  # noqa: E402
+from plugins.violin_guard import (
+    handlers as service,
+)
+from plugins.violin_guard import handlers as tools  # noqa: E402
 from plugins.violin_guard.targets import resolve_target  # noqa: E402
 from tests.guard.receipt_fixture import bind_active_task  # noqa: E402
 

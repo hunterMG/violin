@@ -13,6 +13,8 @@ hypothesis, history, evidence, and sync arguments needed by the full guard.
 
 from __future__ import annotations
 
+import contextlib
+import ipaddress
 import re
 import shlex
 from urllib.parse import urlsplit
@@ -73,6 +75,7 @@ _NETWORK_MODULE_RE = re.compile(
     r"\b(?:http\.server|requests|httpx|urllib(?:\.request)?|socket(?:server)?|scapy|paramiko)\b",
     re.IGNORECASE,
 )
+_COMMAND_SUBSTITUTION_RE = re.compile(r"\$\(|`")
 _SUSPICIOUS_SCRIPT_RE = re.compile(
     r"\b(?:attack|exploit|fuzz|payload|poc|probe|recon|scan|scanner)\b",
     re.IGNORECASE,
@@ -158,10 +161,24 @@ def _has_target_literal(command: str) -> bool:
             if authority.count(":") == 1:
                 authority = authority.split(":", 1)[0]
             if _IPV4_RE.fullmatch(authority):
+                if authority in {"127.0.0.1", "0.0.0.0"}:
+                    continue
                 return True
+            with contextlib.suppress(ValueError):
+                clean_ip = authority.strip("[]")
+                ip_obj = ipaddress.ip_address(clean_ip)
+                if not ip_obj.is_loopback and not ip_obj.is_unspecified:
+                    return True
+                continue
             if "://" in value:
                 try:
-                    if urlsplit(value).hostname:
+                    hostname = urlsplit(value).hostname
+                    if hostname and hostname.lower() not in {
+                        "localhost",
+                        "127.0.0.1",
+                        "0.0.0.0",
+                        "::1",
+                    }:
                         return True
                 except ValueError:
                     return True
@@ -170,10 +187,40 @@ def _has_target_literal(command: str) -> bool:
             # hostname remains meaningful for commands such as `ping host`.
             if "/" in value or "\\" in value or value.startswith("."):
                 continue
+            if authority.lower() in {"localhost"}:
+                continue
             if any(value.lower().endswith(suffix) for suffix in _LOCAL_FILE_SUFFIXES):
                 continue
             if _DOMAIN_RE.fullmatch(authority):
                 return True
+    return False
+
+
+def _is_violin_init_command(segment: str) -> bool:
+    """Return whether ``segment`` invokes Violin's host-local bootstrap command."""
+    if _first_executable(segment) not in {"python", "python3"}:
+        return False
+    words = _command_words(segment)
+    for index, word in enumerate(words):
+        script = word.replace("\\", "/").removeprefix("./")
+        if (
+            (script == "scripts/violin_guard.py" or script.endswith("/scripts/violin_guard.py"))
+            and index + 1 < len(words)
+            and words[index + 1] == "init-engagement"
+        ):
+            return True
+    return False
+
+
+def _dynamic_init_host(segment: str) -> bool:
+    """Reject host indirection while allowing variables in local path arguments."""
+    words = _command_words(segment)
+    for index, word in enumerate(words):
+        if word == "--host" and index + 1 < len(words):
+            return "$" in words[index + 1] or "`" in words[index + 1]
+        if word.startswith("--host="):
+            host = word.partition("=")[2]
+            return "$" in host or "`" in host
     return False
 
 
@@ -202,6 +249,18 @@ def _block_terminal_segment(segment: str) -> str | None:
         and all(_is_known_source_host(host) for host in url_hosts)
         and not _IPV4_RE.search(segment)
     ):
+        return None
+
+    # ``init-engagement`` writes local workspace files and creates no network
+    # traffic, so its scope host may be provided directly. Keep the exception
+    # narrow: other guard subcommands still use the normal classifier, and
+    # target values hidden behind shell expansion remain blocked.
+    if _is_violin_init_command(segment):
+        if _COMMAND_SUBSTITUTION_RE.search(segment) or _dynamic_init_host(segment):
+            return _message(
+                "dynamic init-engagement host detected; pass --host directly without "
+                "shell or file indirection"
+            )
         return None
 
     if executable not in _LOCAL_COMMANDS and _has_target_literal(segment):

@@ -9,10 +9,21 @@ from pathlib import Path
 
 import pytest
 
-from plugins.violin_guard import bootstrap, findings, history, hypotheses, ptt, service, state
+from plugins.violin_guard import (
+    bootstrap,
+    findings,
+    history,
+    hypotheses,
+    ptt,
+    state,
+)
+from plugins.violin_guard import (
+    handlers as service,
+)
 from plugins.violin_guard.skill_receipts import (
     SkillViewResult,
     complete_delivery,
+    get_binding,
     prepare_delivery,
     prepare_review_readiness,
 )
@@ -152,6 +163,40 @@ def test_review_batch_updates_ptt_and_clears_lock(tmp_path: Path, task_status: s
     assert result["released"] is True
     assert not state.has_pending_sync(eng)
     assert "reviewed-batch:" in (eng / "state" / "ptt.md").read_text(encoding="utf-8")
+
+
+def test_review_batch_does_not_replace_execution_skill_binding(tmp_path: Path, monkeypatch) -> None:
+    eng = _engagement(tmp_path)
+    _pending_batch(eng)
+    original_binding = get_binding(eng, "PT-010")
+    monkeypatch.setattr(
+        service,
+        "HermesSkillViewAdapter",
+        lambda: type(
+            "Ready",
+            (),
+            {"view": lambda *_args, **_kwargs: SkillViewResult(True, "pentest review")},
+        )(),
+    )
+    args = {
+        "eng_dir": str(eng),
+        "id": "PT-010",
+        "status": "[~]",
+        "note": "Reviewed service discovery evidence",
+        "skill": "pentest",
+        "outcome": "progress",
+        "evidence_paths": ["evidence/executions/batch-command.stdout.txt"],
+        "next_action": "enumerate HTTP",
+        "next_technique": "http-enumeration",
+    }
+
+    prepared = json.loads(service.handle_review_batch(args))
+    assert prepared["status"] == "skill_prepared"
+    reviewed = json.loads(service.handle_review_batch(args))
+
+    assert reviewed["status"] == "ok"
+    assert reviewed["binding_task_id"] is None
+    assert get_binding(eng, "PT-010") == original_binding
 
 
 def test_review_batch_creates_finding_from_current_batch_receipts(tmp_path: Path) -> None:

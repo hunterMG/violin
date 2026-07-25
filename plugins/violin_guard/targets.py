@@ -48,6 +48,7 @@ _COMMON_FILE_SUFFIXES = {
     ".exe",
     ".dll",
 }
+_LOCAL_HOSTS = {"127.0.0.1", "0.0.0.0", "localhost", "::1"}
 
 
 @dataclass
@@ -65,10 +66,6 @@ class _TargetPolicy:
     research_hosts: set[str]
     callback_hosts: set[str]
 
-    @property
-    def known_hosts(self) -> set[str]:
-        return self.allowed | self.excluded | self.research_hosts | self.callback_hosts
-
     def is_excluded(self, candidate: str) -> bool:
         return _matches_host(candidate, self.excluded) or _matches_network(
             candidate, self.excluded_networks
@@ -80,7 +77,7 @@ class _TargetPolicy:
         )
 
     def is_secondary_only(self, candidate: str) -> bool:
-        return _matches_host(candidate, self.callback_hosts | self.research_hosts)
+        return _matches_host(candidate, self.callback_hosts | self.research_hosts | _LOCAL_HOSTS)
 
     def check_primary(self, candidate: str, result: TargetCheckResult) -> None:
         if self.is_excluded(candidate):
@@ -297,7 +294,11 @@ def _parse_target_token(token: str) -> str | None:
         parsed = urlsplit(raw if raw.startswith("//") or "://" in raw else f"//{raw}")
     except ValueError:
         return None
-    return _valid_hostname(parsed.hostname) if parsed.hostname else None
+    if not parsed.hostname:
+        return None
+    with contextlib.suppress(ValueError):
+        return str(ipaddress.ip_address(parsed.hostname)).lower()
+    return _valid_hostname(parsed.hostname)
 
 
 def _dev_network_host(token: str) -> str | None:
@@ -436,9 +437,9 @@ def _is_ip_network(value: str) -> bool:
 
 __all__ = [
     "TargetCheckResult",
+    "check_scope_targets",
     "extract_target_candidates",
     "normalise_target",
     "resolve_target",
-    "check_scope_targets",
     "scope_hosts",
 ]

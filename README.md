@@ -245,7 +245,7 @@ python scripts/violin_guard.py check-release
 
 Validates the plugin manifest and registered tools, isolated Hermes-style plugin import, stale skill references, Ruff, and the full pytest suite.
 
-Hermes skills are loaded on demand and enforced by Violin receipts. Start with `pentest`, then use `violin_record_ptt` to select the route-required skill. The first call prepares its real `skill_view` content without mutating the PTT; repeat the same transition on the next turn to bind it. `violin_status` reports the route, binding, context generation, recovery action, and any obsolete legacy marker. Target and browser activity are blocked in both the delivery and binding turns.
+Hermes skills are loaded on demand and enforced by Violin receipts. Start with `pentest`, then use `violin_record_ptt` to select the route-required skill. The first call prepares its real `skill_view` content without mutating the PTT; repeat the same transition after that tool result returns to the model to bind it. `violin_status` reports the route, binding, context generation, recovery action, and any obsolete legacy marker. Target and browser activity are blocked only in the same model call as delivery or binding, then open automatically on the next tool-loop continuation.
 
 ---
 

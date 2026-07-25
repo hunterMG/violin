@@ -1,4 +1,3 @@
-import importlib.util
 import json
 import subprocess
 import sys
@@ -35,27 +34,18 @@ engagement:
 """
 
 
-def _load_sub(name, path):
-    spec = importlib.util.spec_from_file_location("vgpkg." + name, path)
-    mod = importlib.util.module_from_spec(spec)
-    mod.__package__ = "vgpkg"
-    sys.modules["vgpkg." + name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-# Load the plugin as a real package so `from . import utils` resolves.
-_PLUGIN = ROOT / "plugins/violin_guard"
-_PKG = importlib.util.spec_from_file_location("vgpkg", _PLUGIN / "__init__.py")
-pkg = importlib.util.module_from_spec(_PKG)
-pkg.__path__ = [str(_PLUGIN)]
-pkg.__package__ = "vgpkg"
-sys.modules["vgpkg"] = pkg
-
-TOOLS = _load_sub("tools", _PLUGIN / "service.py")
-
-# Import core modules from the new location
-from plugins.violin_guard import bootstrap, command, execution, history, hypotheses, ptt, state
+from plugins.violin_guard import (
+    bootstrap,
+    command,
+    execution,
+    history,
+    hypotheses,
+    ptt,
+    state,
+)
+from plugins.violin_guard import (
+    handlers as TOOLS,
+)
 from plugins.violin_guard.targets import extract_target_candidates
 
 
@@ -116,10 +106,7 @@ def _fake_target_executor(monkeypatch):
             "sync_credit_remaining": remaining,
         }
 
-    # Patch the exact module used by the separately loaded vgpkg.tools facade.
-    monkeypatch.setattr(TOOLS.execution, "execute", fake_execute)
     monkeypatch.setattr(execution, "execute", fake_execute)
-    assert TOOLS.execution.execute is fake_execute
 
 
 def _init_e2e(tmp_path, skill_file):
@@ -525,6 +512,13 @@ def test_init_engagement_creates_compliant_artifacts(tmp_path):
     # legitimate on a brand-new engagement â€” no task touched yet).
     res = bootstrap.check_bootstrap(str(eng), auto_repair=False)
     assert int(res) in (0, 2), "bootstrap must be complete (or REVIEW for pristine PTT) after init"
+
+
+def test_init_engagement_persists_explicit_session_id(tmp_path):
+    eng = tmp_path / "session-bootstrap"
+
+    assert bootstrap.init_engagement(str(eng), session_id="ctf-eu1") == 0
+    assert state.resolve_session_id(eng) == "ctf-eu1"
 
 
 def test_auto_repair_creates_missing_artifacts(tmp_path):

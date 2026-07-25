@@ -87,7 +87,7 @@ def _validate_from_pending_batch(
     evidence = _batch_evidence(engagement, pending)
     if not evidence:
         raise ValueError("the current batch has no completed execution receipts to cite")
-    normalized_hypothesis = hypothesis_id.removeprefix("H-").zfill(3)
+    normalized_hypothesis = hypothesis_id.strip().upper().removeprefix("H-").zfill(3)
     hypothesis = next(
         (
             item

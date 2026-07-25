@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import time
@@ -107,9 +108,10 @@ def lock_file(path: Path):
 
 
 def read_json(path: Path) -> dict[str, Any]:
-    """Read a JSON document, returning an empty dict on error."""
+    """Read a JSON document, returning an empty dict on error or non-dict root."""
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
 
@@ -119,14 +121,19 @@ def atomic_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-    for attempt in range(5):
-        try:
-            tmp.replace(path)
-            return
-        except PermissionError:
-            if attempt == 4:
-                raise
-            time.sleep(0.02 * (attempt + 1))
+    try:
+        for attempt in range(5):
+            try:
+                tmp.replace(path)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.02 * (attempt + 1))
+    finally:
+        if tmp.exists():
+            with contextlib.suppress(OSError):
+                tmp.unlink()
 
 
 def mutate_json(path: Path, mutation) -> Any:
@@ -306,16 +313,39 @@ def record_semantic_review(
     next_technique: str,
     research_attempted: bool = False,
 ) -> dict[str, Any]:
-    """Track evidence-backed semantic progress and the five-review hard lock."""
+    """Track evidence-backed technique-pivot progress and the anti-stuck lock.
+
+    The anti-stuck lock is meant to catch *circular* recon — repeating the same
+    path without learning.  It therefore counts *distinct technique pivots*
+    (each ``technique`` key, tracked via ``violin_record_hypothesis`` / the
+    ``technique`` argument), not raw ``violin_review_batch`` calls.  A review
+    resets the no-progress counter when it is either:
+
+    * **evidence-backed** — ``outcome`` is progress/validated/rejected *and*
+      the batch carried completed execution evidence, or
+    * **a genuine pivot** — ``next_technique`` differs from the current
+      ``technique`` (a new attack path), which is exactly the behaviour the
+      lock exists to encourage.
+
+    Low-evidence iterative CTF recon therefore never accumulates toward a lock
+    as long as each step pivots to a new technique or records evidence.
+    """
 
     path = _state_dir(eng_dir) / _SEMANTIC_FILE
     key = "|".join((task_id, hypothesis_id, skill, technique.strip().lower()))
-    positive = outcome in {"progress", "validated", "rejected"} and bool(evidence_paths)
+    has_evidence = bool(evidence_paths)
+    positive = outcome in {"progress", "validated", "rejected"} and has_evidence
+    pivoted = bool(
+        next_technique.strip().lower()
+        and next_technique.strip().lower() != technique.strip().lower()
+    )
 
     def record(data: dict[str, Any]) -> dict[str, Any]:
         entries = data.setdefault("entries", {})
         entry = entries.get(key, {"count": 0})
-        count = 0 if positive else int(entry.get("count") or 0) + 1
+        # Reset the per-technique no-progress counter on evidence-backed output
+        # or a real pivot; otherwise increment it as a stuck repetition.
+        count = 0 if (positive or pivoted) else int(entry.get("count") or 0) + 1
         entry.update(
             {
                 "count": count,
@@ -323,27 +353,43 @@ def record_semantic_review(
                 "evidence_paths": evidence_paths,
                 "next_action": next_action,
                 "next_technique": next_technique,
+                "pivoted": pivoted,
                 "updated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             }
         )
         entries[key] = entry
         lock = data.get("lock") or {}
-        pivoted = (
-            next_technique.strip().lower()
-            and next_technique.strip().lower() != technique.strip().lower()
+        # Whole-engagement stuck signal: total no-progress reviews across all
+        # keys.  Pivots and evidence reset it, so a busy CTF loop stays open.
+        total_stuck = sum(
+            int(item.get("count") or 0) for item in entries.values() if not item.get("pivoted")
         )
-        research_after_lock = bool((data.get("research_attempts") or []) and lock)
-        if lock and research_after_lock and pivoted:
+        if lock and (has_evidence or (data.get("research_attempts") and pivoted)):
             data.pop("lock", None)
-        elif count >= 5:
+        elif total_stuck >= 5 and not pivoted and not has_evidence:
             data["lock"] = {
                 "key": key,
-                "count": count,
-                "reason": "five semantic no-progress reviews",
+                "count": total_stuck,
+                "reason": "five technique no-progress reviews without a pivot or evidence",
             }
-        return {"count": count, "warning": count >= 3, "locked": bool(data.get("lock"))}
+        return {
+            "count": count,
+            "warning": total_stuck >= 3,
+            "locked": bool(data.get("lock")),
+        }
 
     return mutate_json(path, record)
+
+
+def clear_semantic_lock(eng_dir: str | Path) -> None:
+    """Clear any active semantic progress lock."""
+    path = _state_dir(eng_dir) / _SEMANTIC_FILE
+
+    def record(data: dict[str, Any]) -> dict[str, Any]:
+        data.pop("lock", None)
+        return data
+
+    mutate_json(path, record)
 
 
 def record_research_attempt(eng_dir: str | Path, tool_name: str, success: bool) -> None:

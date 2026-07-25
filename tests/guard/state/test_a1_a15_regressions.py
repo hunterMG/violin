@@ -11,8 +11,10 @@ from plugins.violin_guard import (
     execution,
     hypotheses,
     ptt,
-    service,
     state,
+)
+from plugins.violin_guard import (
+    handlers as service,
 )
 from plugins.violin_guard.command import CheckCommandArgs, CheckResult, check_scope_authorization
 from plugins.violin_guard.history import append_history, check_history_staleness
@@ -153,7 +155,8 @@ def test_pending_batch_repeat_is_allowed_for_recovery(tmp_path: Path) -> None:
 def test_burst_continues_past_review_required_command(tmp_path: Path, monkeypatch) -> None:
     eng = _engagement(tmp_path)
     checks = iter((CheckResult(warnings=["review first"]), CheckResult()))
-    monkeypatch.setattr(service, "_check_command_internal", lambda _args: next(checks))
+    from plugins.violin_guard.handlers import exec_handlers
+    monkeypatch.setattr(exec_handlers, "_check_command_internal", lambda _args: next(checks))
     executed: list[str] = []
 
     def fake_execute(command: str, **_kwargs):

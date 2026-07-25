@@ -111,7 +111,7 @@ _PROOF_SIGNATURE = re.compile(r"HTTP/\d\.\d\s+\d{3}", re.I)
 _REQUEST_SIGNATURE = re.compile(r"\b(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+/\S+\s+HTTP", re.I)
 
 
-def build_pattern(challenge_id: str, patterns: list[str]) -> re.Pattern | None:
+def build_pattern(patterns: list[str]) -> re.Pattern | None:
     """Build a word-boundary OR pattern from challenge patterns (Fix D).
 
     Uses \b for word-like patterns (alphanumeric), and (?<![a-z0-9])...
@@ -152,7 +152,7 @@ def scan_evidence(eng_dir: Path) -> dict[str, list[Path]]:
     result: dict[str, list[Path]] = {}
     for ch in challenges:
         cid = ch["id"]
-        pat = build_pattern(cid, ch.get("patterns", []))
+        pat = build_pattern(ch.get("patterns", []))
         if not pat:
             continue
         hits = []
@@ -186,7 +186,7 @@ _WALKTHROUGH_WORDS = [
 _WALKTHROUGH_RE = re.compile(r"\b(" + "|".join(_WALKTHROUGH_WORDS) + r")\b", re.I)
 
 
-def check_compliance(hist_text: str, evidence_count: int) -> tuple[int, bool]:
+def check_compliance(hist_text: str) -> tuple[int, bool]:
     """Return (violation_count, is_unknown)."""
     lines = [line for line in hist_text.splitlines() if line.strip() and not line.startswith("#")]
     if not lines or len(lines) < 3:
@@ -287,7 +287,7 @@ def score_engagement(eng_dir: Path) -> dict:
             )
 
     # Compliance (Fix F)
-    violations, compliance_unknown = check_compliance(hist_text, ev_count)
+    violations, compliance_unknown = check_compliance(hist_text)
 
     return {
         "ptt": ptt,

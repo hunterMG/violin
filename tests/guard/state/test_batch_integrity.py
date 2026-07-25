@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from plugins.violin_guard import bootstrap, history, service, state
+from plugins.violin_guard import bootstrap, history, state
+from plugins.violin_guard import handlers as service
 
 
 def _engagement(tmp_path: Path) -> Path:

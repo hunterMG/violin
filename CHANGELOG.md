@@ -4,6 +4,8 @@
 
 - Added receipt-backed skill routing, delivery, task binding, browser enforcement, Kali auto-backend selection, proof-based finding review, and semantic anti-stuck enforcement.
 - Replaced marker-file authorization with two-turn skill preparation and receipt diagnostics; legacy markers can only infer a unique session ID during migration.
+- Allowed direct host-local `init-engagement --host` bootstrapping, persisted runtime session identity before skill delivery, and blocked shell-indirection workarounds.
+- Scoped skill cooldowns to Hermes model API requests so the next tool-loop continuation unlocks automatically, while batch review no longer replaces the active execution-skill binding.
 
 ## 2.0.8
 

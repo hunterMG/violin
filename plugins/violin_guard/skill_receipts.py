@@ -130,7 +130,6 @@ class DeliveryReservation:
     session_id: str
     context_generation: int
     owner: bool
-    recovered_state: bool = False
 
 
 @dataclass(frozen=True)
@@ -327,34 +326,52 @@ def binding_readiness(
         return None, "the bound skill delivery is not ready"
     if delivery.get("bundle_digest") != binding.get("bundle_digest"):
         return None, "the bound skill digest no longer matches its delivery"
-    return {**binding, "delivered_turn_id": delivery.get("delivered_turn_id")}, None
+    return {
+        **binding,
+        "delivered_turn_id": delivery.get("delivered_turn_id"),
+        "delivered_api_request_id": delivery.get("delivered_api_request_id"),
+    }, None
 
 
-def record_delivery_turn(eng_dir: str | Path, *, delivery_id: str, turn_id: str) -> None:
-    """Associate a successful ``skill_view`` result with its Hermes turn."""
+def record_delivery_turn(
+    eng_dir: str | Path,
+    *,
+    delivery_id: str,
+    turn_id: str,
+    api_request_id: str = "",
+) -> None:
+    """Associate a successful ``skill_view`` result with its model call."""
 
-    if not turn_id:
+    if not turn_id and not api_request_id:
         return
 
     def record(data: dict[str, Any]) -> None:
         entry = data["deliveries"].get(delivery_id)
         if entry and entry.get("status") == "delivered":
             entry["delivered_turn_id"] = turn_id
+            entry["delivered_api_request_id"] = api_request_id
             entry["updated_at"] = _now()
 
     _mutate(eng_dir, record)
 
 
-def record_binding_turn(eng_dir: str | Path, *, task_id: str, turn_id: str) -> None:
-    """Associate a binding commit with its Hermes turn."""
+def record_binding_turn(
+    eng_dir: str | Path,
+    *,
+    task_id: str,
+    turn_id: str,
+    api_request_id: str = "",
+) -> None:
+    """Associate a binding commit with its model call."""
 
-    if not turn_id:
+    if not turn_id and not api_request_id:
         return
 
     def record(data: dict[str, Any]) -> None:
         binding = data["bindings"].get(task_id)
         if binding:
             binding["bound_turn_id"] = turn_id
+            binding["bound_api_request_id"] = api_request_id
             binding["bound_at"] = _now()
 
     _mutate(eng_dir, record)

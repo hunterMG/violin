@@ -70,7 +70,7 @@ class ScopeResult(CheckResult):
 
 @dataclass
 class HypothesisResult(CheckResult):
-    hypothesis_count: int = 0
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +257,6 @@ def check_hypothesis_freshness(
 
     hyp_path = eng_dir / "hypotheses.md"
     hyps = hypotheses.parse_hypotheses(hyp_path)
-    result.hypothesis_count = len(hyps)
 
     if not hyps:
         result.add_error(f"phase {phase.value} requires at least one hypothesis in hypotheses.md")

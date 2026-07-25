@@ -11,9 +11,9 @@ from pathlib import Path
 
 from . import (
     code_execution_audit,
+    handlers,  # noqa: E402
     ptt,
     schemas,  # noqa: E402
-    service,  # noqa: E402
     state,  # noqa: E402
 )
 from .skill_receipts import (
@@ -26,8 +26,8 @@ from .terminal_policy import block_terminal_command
 
 __all__ = ["register", "TOOLS", "REGISTERED_TOOLS", "tools"]
 
-TOOLS = service
-tools = service
+TOOLS = handlers
+tools = handlers
 
 _SESSION_ENGAGEMENTS: dict[str, str] = {}
 _TARGET_TOOLS = {
@@ -73,48 +73,48 @@ REGISTERED_TOOLS = [
 def register(ctx) -> None:
     """Called once by the plugin loader during discovery."""
     for name, schema, handler, emoji in (
-        ("violin_check_command", schemas.CHECK_COMMAND_SCHEMA, service.handle_check_command, "🛡️"),
-        ("violin_record_ptt", schemas.RECORD_PTT_SCHEMA, service.handle_record_ptt, "📝"),
+        ("violin_check_command", schemas.CHECK_COMMAND_SCHEMA, handlers.handle_check_command, "🛡️"),
+        ("violin_record_ptt", schemas.RECORD_PTT_SCHEMA, handlers.handle_record_ptt, "📝"),
         (
             "violin_record_hypothesis",
             schemas.RECORD_HYPOTHESIS_SCHEMA,
-            service.handle_record_hypothesis,
+            handlers.handle_record_hypothesis,
             "🔎",
         ),
-        ("violin_exec", schemas.EXEC_SCHEMA, service.handle_exec, "⚡"),
-        ("violin_exec_status", schemas.EXEC_STATUS_SCHEMA, service.handle_exec_status, "i"),
-        ("violin_exec_cancel", schemas.EXEC_CANCEL_SCHEMA, service.handle_exec_cancel, "x"),
+        ("violin_exec", schemas.EXEC_SCHEMA, handlers.handle_exec, "⚡"),
+        ("violin_exec_status", schemas.EXEC_STATUS_SCHEMA, handlers.handle_exec_status, "i"),
+        ("violin_exec_cancel", schemas.EXEC_CANCEL_SCHEMA, handlers.handle_exec_cancel, "x"),
         (
             "violin_review_batch",
             schemas.REVIEW_BATCH_SCHEMA,
-            service.handle_review_batch,
+            handlers.handle_review_batch,
             "✅",
         ),
         (
             "violin_rebind_pending_batch",
             schemas.REBIND_PENDING_BATCH_SCHEMA,
-            service.handle_rebind_pending_batch,
+            handlers.handle_rebind_pending_batch,
             "↔",
         ),
         (
             "violin_heartbeat_done",
             schemas.HEARTBEAT_DONE_SCHEMA,
-            service.handle_heartbeat_done,
+            handlers.handle_heartbeat_done,
             "💓",
         ),
-        ("violin_exec_burst", schemas.EXEC_BURST_SCHEMA, service.handle_exec_burst, "🚀"),
-        ("violin_target", schemas.TARGET_SCHEMA, service.handle_target, "🎯"),
-        ("violin_status", schemas.STATUS_SCHEMA, service.handle_status, "📊"),
+        ("violin_exec_burst", schemas.EXEC_BURST_SCHEMA, handlers.handle_exec_burst, "🚀"),
+        ("violin_target", schemas.TARGET_SCHEMA, handlers.handle_target, "🎯"),
+        ("violin_status", schemas.STATUS_SCHEMA, handlers.handle_status, "📊"),
         (
             "violin_search_exploit",
             schemas.SEARCH_EXPLOIT_SCHEMA,
-            service.handle_search_exploit,
+            handlers.handle_search_exploit,
             "?",
         ),
-        ("violin_httpx", schemas.HTTPX_SCHEMA, service.handle_httpx, "H"),
-        ("violin_nuclei", schemas.NUCLEI_SCHEMA, service.handle_nuclei, "V"),
-        ("violin_ffuf", schemas.FFUF_SCHEMA, service.handle_ffuf, "F"),
-        ("violin_listener", schemas.LISTENER_SCHEMA, service.handle_listener, "L"),
+        ("violin_httpx", schemas.HTTPX_SCHEMA, handlers.handle_httpx, "H"),
+        ("violin_nuclei", schemas.NUCLEI_SCHEMA, handlers.handle_nuclei, "V"),
+        ("violin_ffuf", schemas.FFUF_SCHEMA, handlers.handle_ffuf, "F"),
+        ("violin_listener", schemas.LISTENER_SCHEMA, handlers.handle_listener, "L"),
     ):
         ctx.register_tool(
             name=name,
@@ -149,6 +149,7 @@ def _pre_tool_call_hook(tool_name=None, args=None, **kwargs):
     eng_dir = str(args.get("eng_dir") or "")
     if session_id and eng_dir:
         _SESSION_ENGAGEMENTS[session_id] = eng_dir
+        state.record_session_id(eng_dir, session_id)
     if tool_name in _TARGET_TOOLS or tool_name in _BROWSER_TARGET_TOOLS:
         blocked = _check_turn_binding(tool_name, args, kwargs)
         if blocked:
@@ -178,7 +179,8 @@ def _post_tool_call_hook(tool_name=None, args=None, result=None, duration_ms=0, 
     args = args if isinstance(args, dict) else {}
     eng_dir = str(args.get("eng_dir") or "")
     turn_id = str(kwargs.get("turn_id") or "")
-    if not eng_dir or not turn_id:
+    api_request_id = str(kwargs.get("api_request_id") or "")
+    if not eng_dir or (not turn_id and not api_request_id):
         return
     try:
         payload = json.loads(result) if isinstance(result, str) else result
@@ -187,10 +189,24 @@ def _post_tool_call_hook(tool_name=None, args=None, result=None, duration_ms=0, 
         skill = payload.get("skill") or {}
         delivery_id = str(skill.get("delivery_id") or "")
         if payload.get("status") == "skill_prepared" and delivery_id:
-            record_delivery_turn(eng_dir, delivery_id=delivery_id, turn_id=turn_id)
-        task_id = str(payload.get("task_id") or payload.get("binding_task_id") or "")
+            record_delivery_turn(
+                eng_dir,
+                delivery_id=delivery_id,
+                turn_id=turn_id,
+                api_request_id=api_request_id,
+            )
+        task_id = ""
+        if tool_name == "violin_record_ptt":
+            task_id = str(payload.get("task_id") or "")
+        elif tool_name == "violin_review_batch":
+            task_id = str(payload.get("binding_task_id") or "")
         if payload.get("status") == "ok" and task_id:
-            record_binding_turn(eng_dir, task_id=task_id, turn_id=turn_id)
+            record_binding_turn(
+                eng_dir,
+                task_id=task_id,
+                turn_id=turn_id,
+                api_request_id=api_request_id,
+            )
     except Exception:
         return
 
@@ -243,13 +259,27 @@ def _check_turn_binding(tool_name: str, args: dict, hook: dict) -> str | None:
     binding, reason = binding_readiness(eng_dir, task_id=active.id, session_id=session_id)
     if reason:
         return f"target activity blocked: {reason}; select and prepare a routed skill first"
-    turn_id = str(hook.get("turn_id") or "")
-    if turn_id and turn_id in {
-        str(binding.get("bound_turn_id") or ""),
-        str((binding or {}).get("delivered_turn_id") or ""),
-    }:
+    api_request_id = str(hook.get("api_request_id") or "")
+    receipt_request_ids = {
+        str(binding.get("bound_api_request_id") or ""),
+        str(binding.get("delivered_api_request_id") or ""),
+    }
+    receipt_request_ids.discard("")
+    same_model_call = bool(api_request_id and api_request_id in receipt_request_ids)
+    if not receipt_request_ids:
+        turn_id = str(hook.get("turn_id") or "")
+        same_model_call = bool(
+            turn_id
+            and turn_id
+            in {
+                str(binding.get("bound_turn_id") or ""),
+                str(binding.get("delivered_turn_id") or ""),
+            }
+        )
+    if same_model_call:
         return (
-            "target activity is blocked in the skill delivery/binding turn; retry on the next turn"
+            "target activity is blocked in the same model call as skill delivery/binding; "
+            "process the tool result and retry in the next model continuation"
         )
     return None
 

@@ -20,9 +20,6 @@ class GuardResult:
     def add_info(self, msg: str) -> None:
         self.infos.append(msg)
 
-    def has_errors(self) -> bool:
-        return len(self.errors) > 0
-
     def exit_code(self) -> int:
         if self.errors:
             return 1
