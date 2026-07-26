@@ -1,22 +1,20 @@
 """Target extraction, scope enforcement, and target resolution for guarded commands.
 
-This module owns the networking-aware parsing boundary.  It deliberately uses
-only Python's standard library: ``shlex`` for commands, ``urllib.parse`` for
-URL authorities, and ``ipaddress`` for IP/CIDR validation.
+This module owns the networking-aware parsing boundary, using netaddr for IP/CIDR
+set arithmetic and yarl for RFC 3986 URL parsing.
 """
 
 from __future__ import annotations
 
 import contextlib
-import ipaddress
 import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
-Network = ipaddress.IPv4Network | ipaddress.IPv6Network
+import netaddr
+from yarl import URL
 
 _PATH_VALUE_FLAGS = {
     "-o",
@@ -61,19 +59,19 @@ class TargetCheckResult:
 class _TargetPolicy:
     allowed: set[str]
     excluded: set[str]
-    allowed_networks: list[Network]
-    excluded_networks: list[Network]
+    allowed_ip_set: netaddr.IPSet
+    excluded_ip_set: netaddr.IPSet
     research_hosts: set[str]
     callback_hosts: set[str]
 
     def is_excluded(self, candidate: str) -> bool:
-        return _matches_host(candidate, self.excluded) or _matches_network(
-            candidate, self.excluded_networks
+        return _matches_host(candidate, self.excluded) or _matches_ip_set(
+            candidate, self.excluded_ip_set
         )
 
     def is_assessment_target(self, candidate: str) -> bool:
-        return _matches_host(candidate, self.allowed) or _matches_network(
-            candidate, self.allowed_networks
+        return _matches_host(candidate, self.allowed) or _matches_ip_set(
+            candidate, self.allowed_ip_set
         )
 
     def is_secondary_only(self, candidate: str) -> bool:
@@ -94,8 +92,7 @@ class _TargetPolicy:
             )
         else:
             result.warnings.append(
-                f"primary target {candidate} is not present in scope.yaml targets; "
-                "verify authorization"
+                f"primary target {candidate} is not present in scope.yaml targets; verify authorization"
             )
 
     def check_secondary(self, candidate: str, result: TargetCheckResult) -> None:
@@ -113,13 +110,6 @@ class _TargetPolicy:
 
 def extract_target_candidates(command: str) -> list[str]:
     """Return ordered, unique network targets found in a shell command."""
-
-    return list(dict.fromkeys(_target_candidates(command)))
-
-
-def _target_candidates(command: str) -> list[str]:
-    """Return network targets parsed from a shell command."""
-
     candidates: list[str] = []
     skip_path_value = False
     for token in _command_tokens(command):
@@ -129,71 +119,34 @@ def _target_candidates(command: str) -> list[str]:
         if token in _PATH_VALUE_FLAGS:
             skip_path_value = True
             continue
-        if token in _REDIRECTION_OPERATORS or _is_path_option(token):
+        if token in _REDIRECTION_OPERATORS or any(
+            token.startswith(f"{flag}=") for flag in _PATH_VALUE_FLAGS
+        ):
             continue
 
         if token.rstrip(";, ").endswith("()"):
             continue
         candidate = token.strip("'\"(),;")
-        if (
-            _looks_like_local_path(candidate)
-            and not _is_network_path(candidate)
-            and ("/" not in candidate or candidate.startswith(("/", "./", "../", "~/", "$", "%")))
+        if _looks_like_local_path(candidate) and not (
+            candidate.startswith(_DEV_NETWORK_PREFIXES)
+            or candidate.startswith("//")
+            or "://" in candidate
         ):
             continue
-        host = _parse_target_token(candidate)
-        if host:
-            candidates.append(host)
-    return candidates
+        parsed = _parse_target_token(candidate)
+        if parsed:
+            candidates.append(parsed)
+    return list(dict.fromkeys(candidates))
 
 
 def normalise_target(value: str) -> str:
-    """Return a comparable host, accepting legacy ``host (description)`` values."""
-
-    raw = value.strip()
-    raw = re.split(r"\s+\(", raw, maxsplit=1)[0].strip()
-    with contextlib.suppress(ValueError):
-        parsed = urlsplit(raw if "://" in raw else f"//{raw}")
-        if parsed.hostname:
-            return parsed.hostname.lower()
+    """Return a canonical hostname, taking advantage of yarl for RFC 3986 URL parsing."""
+    raw = re.split(r"\s+\(", value.strip(), maxsplit=1)[0].strip()
+    with contextlib.suppress(Exception):
+        url = URL(raw if "://" in raw else f"//{raw}")
+        if url.host:
+            return url.host.lower()
     return raw.lower()
-
-
-def _resolve_by_role(targets_sec: dict, role: str) -> str | None:
-    """Resolve target by explicit role key."""
-    roles = targets_sec.get("roles", {}) or {}
-    role_val = roles.get(role)
-    if isinstance(role_val, list) and role_val:
-        return str(role_val[0]).strip()
-    if role_val is not None:
-        return str(role_val).strip()
-    return None
-
-
-def _resolve_by_host_query(scope_data: dict, host_query: str) -> str | None:
-    """Resolve target by matching host query against allowed scope hosts."""
-    allowed_hosts = scope_hosts(scope_data)
-    norm_host = normalise_target(host_query)
-    if norm_host in allowed_hosts:
-        return host_query.strip()
-    return None
-
-
-def _resolve_by_fallback(targets_sec: dict) -> str | None:
-    """Resolve target via fallback chain: ip_addresses -> urls -> domains -> hostnames -> roles."""
-    for key in ("ip_addresses", "urls", "in_scope_urls", "domains", "hostnames"):
-        items = targets_sec.get(key, [])
-        if isinstance(items, list) and items:
-            return str(items[0]).strip()
-
-    roles = targets_sec.get("roles", {}) or {}
-    if roles:
-        first_val = next(iter(roles.values()))
-        if isinstance(first_val, list) and first_val:
-            return str(first_val[0]).strip()
-        if first_val is not None:
-            return str(first_val).strip()
-    return None
 
 
 def resolve_target(
@@ -202,77 +155,99 @@ def resolve_target(
     host_query: str | None,
     field: str = "ip",
 ) -> str | None:
-    """Resolve a single target value from scope data.
-
-    Resolution order:
-      1. Explicit role lookup
-      2. Host query against in-scope hosts
-      3. Fallback to first ip_address, then url/domain/hostname/role value
-
-    Returns the resolved raw string (before field extraction), or None if no
-    target is found.
-    """
+    """Resolve a single target value from scope data."""
     targets_sec = scope_data.get("targets", {}) or {}
 
-    target_val = _resolve_by_role(targets_sec, role) if role else None
+    target_val = None
+    if role:
+        role_val = (targets_sec.get("roles", {}) or {}).get(role)
+        target_val = (
+            str(role_val[0]).strip()
+            if isinstance(role_val, list) and role_val
+            else str(role_val).strip()
+            if role_val is not None
+            else None
+        )
 
-    if not target_val and host_query:
-        target_val = _resolve_by_host_query(scope_data, host_query)
+    if not target_val and host_query and normalise_target(host_query) in scope_hosts(scope_data):
+        target_val = host_query.strip()
 
     if not target_val:
-        target_val = _resolve_by_fallback(targets_sec)
+        for key in ("ip_addresses", "urls", "in_scope_urls", "domains", "hostnames"):
+            items = targets_sec.get(key, [])
+            if isinstance(items, list) and items:
+                target_val = str(items[0]).strip()
+                break
+        if not target_val:
+            roles = targets_sec.get("roles", {}) or {}
+            if roles:
+                first_val = next(iter(roles.values()))
+                target_val = (
+                    str(first_val[0]).strip()
+                    if isinstance(first_val, list) and first_val
+                    else str(first_val).strip()
+                    if first_val is not None
+                    else None
+                )
 
     if not target_val:
         return None
 
     if "://" in target_val and field in ("ip", "host"):
-        with contextlib.suppress(ValueError):
-            parsed = urlsplit(target_val)
-            if parsed.hostname:
-                return parsed.hostname
+        with contextlib.suppress(Exception):
+            url = URL(target_val)
+            if url.host:
+                return url.host
 
     return target_val
+
+
+def _research_hosts(scope: dict[str, Any]) -> set[str]:
+    """Return explicit public reference hosts, never assessment targets."""
+    return {normalise_target(v) for v in _values(scope.get("research_hosts", []))}
+
+
+def _callback_hosts(scope: dict[str, Any]) -> set[str]:
+    """Return operator-approved local callback/listener infrastructure."""
+    assessment_hosts = scope.get("assessment_hosts", {}) or {}
+    if not isinstance(assessment_hosts, dict):
+        return set()
+    return {normalise_target(v) for v in _values(assessment_hosts.get("callback_hosts", []))}
 
 
 def check_scope_targets(
     scope_path: Path, command: str, primary_target: str | None = None
 ) -> TargetCheckResult:
     """Block excluded or out-of-scope IP/CIDR targets in ``command``."""
-
     result = TargetCheckResult()
     scope = _read_scope(scope_path)
     if scope is None:
         return result
 
-    policy = _target_policy(scope)
+    policy = _TargetPolicy(
+        allowed=scope_hosts(scope, "targets"),
+        excluded=scope_hosts(scope, "exclusions"),
+        allowed_ip_set=_scope_ip_set(scope, "targets"),
+        excluded_ip_set=_scope_ip_set(scope, "exclusions"),
+        research_hosts=_research_hosts(scope),
+        callback_hosts=_callback_hosts(scope),
+    )
+
     explicit = normalise_target(primary_target) if primary_target else ""
-    candidates = _target_candidates(command)
+    candidates = extract_target_candidates(command)
     seen: set[str] = set()
     if explicit:
         seen.add(explicit)
         policy.check_primary(explicit, result)
     for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        policy.check_secondary(candidate, result)
+        if candidate not in seen:
+            seen.add(candidate)
+            policy.check_secondary(candidate, result)
     return result
 
 
-def _target_policy(scope: dict[str, Any]) -> _TargetPolicy:
-    return _TargetPolicy(
-        allowed=scope_hosts(scope, "targets"),
-        excluded=scope_hosts(scope, "exclusions"),
-        allowed_networks=_scope_networks(scope, "targets"),
-        excluded_networks=_scope_networks(scope, "exclusions"),
-        research_hosts=_research_hosts(scope),
-        callback_hosts=_callback_hosts(scope),
-    )
-
-
 def _command_tokens(command: str) -> list[str]:
-    """Tokenize a command and one quoted nested-command level."""
-
+    """Tokenize a command and nested shell words."""
     tokens = _split_shell_words(command)
     return tokens + [
         nested for token in tokens if " " in token for nested in _split_shell_words(token)
@@ -295,20 +270,20 @@ def _parse_target_token(token: str) -> str | None:
     if not raw:
         return None
     unbracketed = raw[1:-1] if raw.startswith("[") and raw.endswith("]") else raw
-    with contextlib.suppress(ValueError):
-        if "/" in unbracketed:
-            return str(ipaddress.ip_network(unbracketed, strict=False)).lower()
-        return str(ipaddress.ip_address(unbracketed)).lower()
 
-    try:
-        parsed = urlsplit(raw if raw.startswith("//") or "://" in raw else f"//{raw}")
-    except ValueError:
-        return None
-    if not parsed.hostname:
-        return None
-    with contextlib.suppress(ValueError):
-        return str(ipaddress.ip_address(parsed.hostname)).lower()
-    return _valid_hostname(parsed.hostname)
+    with contextlib.suppress(Exception):
+        if "/" in unbracketed:
+            return str(netaddr.IPNetwork(unbracketed).cidr).lower()
+        return str(netaddr.IPAddress(unbracketed)).lower()
+
+    with contextlib.suppress(Exception):
+        url = URL(raw if raw.startswith("//") or "://" in raw else f"//{raw}")
+        if url.host:
+            with contextlib.suppress(Exception):
+                return str(netaddr.IPAddress(url.host)).lower()
+            return _valid_hostname(url.host)
+
+    return None
 
 
 def _dev_network_host(token: str) -> str | None:
@@ -327,33 +302,28 @@ def _valid_hostname(value: str) -> str | None:
     labels = host.split(".")
     if not host or len(host) > 253 or len(labels) < 2:
         return None
-    if any(not label or len(label) > 63 for label in labels):
-        return None
-    if any(label.startswith("-") or label.endswith("-") for label in labels):
-        return None
     if any(
-        not all(char.isascii() and (char.isalnum() or char == "-") for char in label)
+        not label
+        or len(label) > 63
+        or label.startswith("-")
+        or label.endswith("-")
+        or not all(char.isascii() and (char.isalnum() or char == "-") for char in label)
         for label in labels
     ):
         return None
     return host
 
 
-def _is_path_option(token: str) -> bool:
-    return any(token.startswith(f"{flag}=") for flag in _PATH_VALUE_FLAGS)
-
-
-def _is_network_path(token: str) -> bool:
-    return token.startswith(_DEV_NETWORK_PREFIXES) or token.startswith("//") or "://" in token
-
-
 def _looks_like_local_path(token: str) -> bool:
     normalized = token.replace("\\", "/")
-    return (
-        normalized.startswith(("/", "./", "../", "~/", "$", "%"))
-        or "/" in normalized
-        or any(normalized.lower().endswith(suffix) for suffix in _COMMON_FILE_SUFFIXES)
-    )
+    if normalized.startswith(("/", "./", "../", "~/", "$", "%")):
+        return True
+    if any(normalized.lower().endswith(suffix) for suffix in _COMMON_FILE_SUFFIXES):
+        return True
+    if "/" in normalized:
+        first_part = normalized.split("/", 1)[0]
+        return not _valid_hostname(first_part)
+    return False
 
 
 def _read_scope(path: Path) -> dict[str, Any] | None:
@@ -363,14 +333,13 @@ def _read_scope(path: Path) -> dict[str, Any] | None:
         import yaml
 
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        return data if isinstance(data, dict) else None
     except Exception:
         return None
-    return data if isinstance(data, dict) else None
 
 
 def scope_hosts(scope: dict[str, Any], section: str = "targets") -> set[str]:
     """Return canonical hosts from one scope section."""
-
     values = scope.get(section, {}) or {}
     if section == "exclusions":
         return {normalise_target(value) for value in _values(values)}
@@ -378,32 +347,18 @@ def scope_hosts(scope: dict[str, Any], section: str = "targets") -> set[str]:
     return {normalise_target(value) for key in keys for value in _values(values.get(key, []))}
 
 
-def _research_hosts(scope: dict[str, Any]) -> set[str]:
-    """Return explicit public reference hosts, never assessment targets."""
-    return {normalise_target(value) for value in _values(scope.get("research_hosts", []))}
-
-
-def _callback_hosts(scope: dict[str, Any]) -> set[str]:
-    """Return operator-approved local callback/listener infrastructure."""
-
-    assessment_hosts = scope.get("assessment_hosts", {}) or {}
-    if not isinstance(assessment_hosts, dict):
-        return set()
-    return {
-        normalise_target(value) for value in _values(assessment_hosts.get("callback_hosts", []))
-    }
-
-
-def _scope_networks(scope: dict[str, Any], section: str) -> list[Network]:
+def _scope_ip_set(scope: dict[str, Any], section: str) -> netaddr.IPSet:
     values = scope.get(section, {}) or {}
-    networks: list[Network] = []
-    for key in ("ip_addresses", "cidrs"):
+    ip_set = netaddr.IPSet()
+    for key in ("ip_addresses", "cidrs", "ranges"):
         for value in _values(values.get(key, [])):
-            try:
-                networks.append(ipaddress.ip_network(value, strict=False))
-            except ValueError:
-                continue
-    return networks
+            with contextlib.suppress(Exception):
+                if "-" in value and not value.startswith("-"):
+                    parts = value.split("-", 1)
+                    ip_set.add(netaddr.IPRange(parts[0].strip(), parts[1].strip()))
+                else:
+                    ip_set.add(netaddr.IPNetwork(value))
+    return ip_set
 
 
 def _values(value: Any):
@@ -417,14 +372,16 @@ def _values(value: Any):
         yield str(value)
 
 
-def _matches_network(candidate: str, networks: list[Network]) -> bool:
-    try:
-        network = ipaddress.ip_network(candidate, strict=False)
-    except ValueError:
+def _matches_ip_set(candidate: str, ip_set: netaddr.IPSet) -> bool:
+    if not ip_set:
         return False
-    return any(
-        network.version == allowed.version and network.subnet_of(allowed) for allowed in networks
-    )
+    with contextlib.suppress(Exception):
+        if "/" in candidate:
+            cand_net = netaddr.IPNetwork(candidate)
+            return cand_net in ip_set or ip_set.issuperset(cand_net)
+        cand_ip = netaddr.IPAddress(candidate)
+        return cand_ip in ip_set
+    return False
 
 
 def _matches_host(candidate: str, allowed: set[str]) -> bool:
@@ -438,11 +395,10 @@ def _matches_host(candidate: str, allowed: set[str]) -> bool:
 
 
 def _is_ip_network(value: str) -> bool:
-    try:
-        ipaddress.ip_network(value, strict=False)
-    except ValueError:
-        return False
-    return True
+    with contextlib.suppress(Exception):
+        netaddr.IPNetwork(value)
+        return True
+    return False
 
 
 def resolve_command_targets(
