@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -315,7 +315,10 @@ class StatusArgsModel(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def validate_args[T: BaseModel](model_cls: type[T], raw_args: dict[str, Any] | None) -> T:
+T = TypeVar("T", bound=BaseModel)
+
+
+def validate_args(model_cls: type[T], raw_args: dict[str, Any] | None) -> T:
     """Validate raw payload dictionary using Pydantic model."""
     return model_cls.model_validate(raw_args or {})
 
