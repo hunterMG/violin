@@ -6,6 +6,10 @@
 - Replaced marker-file authorization with two-turn skill preparation and receipt diagnostics; legacy markers can only infer a unique session ID during migration.
 - Allowed direct host-local `init-engagement --host` bootstrapping, persisted runtime session identity before skill delivery, and blocked shell-indirection workarounds.
 - Scoped skill cooldowns to Hermes model API requests so the next tool-loop continuation unlocks automatically, while batch review no longer replaces the active execution-skill binding.
+- Migrated guard tool schemas and parameter validation to Pydantic v2.
+- Replaced platform-specific process termination with cross-platform `psutil` process tree traversal and cleanup.
+- Upgraded target IP/CIDR scope policy arithmetic to `netaddr.IPSet` and RFC 3986 URL parsing to `yarl`.
+- Replaced shell regexes in terminal policy with `bashlex` AST tokenization and command parsing.
 
 ## 2.0.8
 

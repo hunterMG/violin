@@ -218,7 +218,10 @@ violin/
 ├── config.yaml             # Profile config (toolsets, safety, memory)
 ├── distribution.yaml       # Hermes distribution manifest
 ├── plugins/violin_guard/   # Required Hermes guard plugin and execution boundary
-│   ├── terminal_policy.py  # Best-effort blocks for clearly target-touching raw terminal calls
+│   ├── bash_ast.py         # bashlex AST command tokenization and parsing
+│   ├── terminal_policy.py  # AST-based best-effort blocks for target-touching raw terminal calls
+│   ├── targets.py          # Scope enforcement using netaddr and yarl URL parsing
+│   ├── schemas.py          # Pydantic v2 tool schemas and validation
 │   └── code_execution_audit.py # Engagement audit contract for execute_code
 ├── scripts/                # CLI and release smoke helpers
 │   ├── violin_guard.py     # Diagnostic/admin CLI over the plugin modules
