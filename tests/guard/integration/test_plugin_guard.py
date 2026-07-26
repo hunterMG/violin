@@ -384,6 +384,84 @@ def test_exploitation_requires_cve_and_exploit_research_attempts(tmp_path):
     assert not allowed.errors, allowed.errors
 
 
+def test_hypothesis_enforces_scope_target_fallback(tmp_path):
+    """Verify hypothesis guard checks scope target when command contains no target string."""
+    (tmp_path / "scope").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "scope" / "scope.yaml").write_text(
+        "targets:\n  ip_addresses:\n    - 10.129.47.140\n"
+        "rules_of_engagement:\n  allowed_actions: [RECON, EXPLOITATION]\n"
+        "engagement:\n  name: Test\n"
+        "authorized_parties: [Tester]\n"
+        "authorisation:\n  confirmed: true\n",
+        encoding="utf-8",
+    )
+    # Hypothesis is for a DIFFERENT target host (192.168.1.1)
+    (tmp_path / "hypotheses.md").write_text(
+        "### H-001: Other host\n"
+        "- **Target:** 192.168.1.1\n"
+        "- **Status:** Validated\n"
+        "- **Phase:** EXPLOITATION\n"
+        "- **CVE Research:** Done\n"
+        "- **Exploit Research:** Done\n",
+        encoding="utf-8",
+    )
+
+    # Command has no IP string, but scope target 10.129.47.140 should NOT match 192.168.1.1 hypothesis
+    result = command.check_hypothesis_freshness(
+        tmp_path, command.Phase.EXPLOITATION, "python3 exploit.py"
+    )
+    assert result.errors, "Expected error when hypothesis target doesn't match scope target"
+    assert any(
+        "requires a non-rejected hypothesis matching the command target" in err
+        for err in result.errors
+    )
+
+
+def test_check_command_enforces_active_task_hypothesis_id(tmp_path):
+    """Verify check_command validates the specific hypothesis ID linked in active PTT task note."""
+    (tmp_path / "scope").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "scope" / "scope.yaml").write_text(
+        "targets:\n  ip_addresses:\n    - 10.129.47.140\n"
+        "rules_of_engagement:\n  allowed_actions: [RECON, EXPLOITATION]\n"
+        "engagement:\n  name: Test\n"
+        "authorized_parties: [Tester]\n"
+        "authorisation:\n  confirmed: true\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state" / "ptt.md").write_text(
+        "## Phase: EXPLOITATION\n\n| PT-001 | [~] | Exploit Task | testing H-002 |\n",
+        encoding="utf-8",
+    )
+    # H-001 has research, but active task links H-002 which has NO research
+    (tmp_path / "hypotheses.md").write_text(
+        "### H-001: First\n"
+        "- **Target:** 10.129.47.140\n"
+        "- **Status:** Validated\n"
+        "- **Phase:** EXPLOITATION\n"
+        "- **CVE Research:** Done\n"
+        "- **Exploit Research:** Done\n\n"
+        "### H-002: Linked Task Hypothesis\n"
+        "- **Target:** 10.129.47.140\n"
+        "- **Status:** Candidate\n"
+        "- **Phase:** EXPLOITATION\n"
+        "- **CVE Research:** \n"
+        "- **Exploit Research:** \n",
+        encoding="utf-8",
+    )
+
+    cmd_args = command.CheckCommandArgs(
+        command="python3 exploit.py 10.129.47.140",
+        phase="EXPLOITATION",
+        eng_dir=str(tmp_path),
+        scope=str(tmp_path / "scope" / "scope.yaml"),
+        session_id="test-session",
+    )
+    res = command.check_command(cmd_args)
+    assert res.errors
+    assert any("H-002 missing CVE Research and Exploit Research" in err for err in res.errors)
+
+
 def test_record_ptt_can_start_pristine_task(tmp_path, monkeypatch):
     from plugins.violin_guard.skill_receipts import SkillViewResult
 

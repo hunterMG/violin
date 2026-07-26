@@ -10,11 +10,20 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .state import lock_file, resolve_eng_dir
+from .state import lock_file, read_json, resolve_eng_dir
 
 _COMMAND_MARKER = " | command="
 _COMMAND_LENGTH_MARKER = " | command_length="
 _RECEIPT_MARKER = " | receipt="
+
+
+def normalize_command(command: str) -> str:
+    """Normalize whitespace and newlines in a command string for reliable history matching."""
+    if not command:
+        return ""
+    lines = command.replace("\r\n", "\n").split("\n")
+    cleaned_parts = [part.strip() for part in lines if part.strip()]
+    return " ".join(cleaned_parts)
 
 
 def _history_path(eng_dir: str | Path) -> Path:
@@ -32,9 +41,10 @@ def append_history(
     path = _history_path(eng_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    clean_command = normalize_command(command) if "\n" in command else command
     line = (
-        f"- {stamp} | phase={phase} | exit_code={exit_code} | command={command}"
-        f"{_COMMAND_LENGTH_MARKER}{len(command)}"
+        f"- {stamp} | phase={phase} | exit_code={exit_code} | command={clean_command}"
+        f"{_COMMAND_LENGTH_MARKER}{len(clean_command)}"
     )
     if receipt_path:
         line += f"{_RECEIPT_MARKER}{receipt_path}"
@@ -50,8 +60,10 @@ def history_contains(eng_dir: str | Path, command: str) -> bool:
     hist = _history_path(eng_dir)
     if not hist.exists():
         return False
+    norm_target = normalize_command(command)
     for line in hist.read_text(encoding="utf-8").splitlines():
-        if _recorded_command(line) == command:
+        rec = _recorded_command(line)
+        if rec == command or (rec is not None and normalize_command(rec) == norm_target):
             return True
     return False
 
@@ -99,23 +111,28 @@ def check_history_staleness(
         infos.append("history.md is empty — first command will be recorded")
         return errors, warnings, infos
 
-    # History entries are written as ``... | command=<command>``.  Compare
+    # History entries are written as ``... | command=<command>``. Compare
     # that field exactly instead of using substring matching, which can reject
     # a command merely because it contains the previous command text.
     last_line = lines[-1]
     recorded_command = _recorded_command(last_line)
-    if recorded_command == command and not allow_pending_repeat:
+    is_repeat = (recorded_command == command) or (
+        recorded_command is not None and normalize_command(recorded_command) == normalize_command(command)
+    )
+    if is_repeat and not allow_pending_repeat:
         errors.append(
             f"command appears to be an exact repeat of the last recorded command: {last_line}"
         )
-    elif recorded_command == command:
+    elif is_repeat:
         infos.append("exact repeat belongs to the pending batch; allowing reconciliation/retry")
 
     return errors, warnings, infos
 
 
 __all__ = [
+    "normalize_command",
     "append_history",
     "history_contains",
     "check_history_staleness",
 ]
+

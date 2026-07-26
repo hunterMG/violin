@@ -142,12 +142,11 @@ def test_batch_review_with_running_background_tunnel(ctf_eng):
             "stderr": f"evidence/executions/{exec_id}.stderr",
         },
     }
-    exec_file = ctf_eng / "state" / "executions" / f"{exec_id}.json"
-    exec_file.parent.mkdir(parents=True, exist_ok=True)
-    state.atomic_json(ctf_eng / "evidence" / "executions" / f"{exec_id}.json", exec_record)
-    (ctf_eng / "evidence" / "executions" / f"{exec_id}.stdout").write_text("", encoding="utf-8")
-    (ctf_eng / "evidence" / "executions" / f"{exec_id}.stderr").write_text("", encoding="utf-8")
-    state.atomic_json(exec_file, exec_record)
+    exec_dir = ctf_eng / "evidence" / "executions"
+    exec_dir.mkdir(parents=True, exist_ok=True)
+    state.atomic_json(exec_dir / f"{exec_id}.json", exec_record)
+    (exec_dir / f"{exec_id}.stdout").write_text("", encoding="utf-8")
+    (exec_dir / f"{exec_id}.stderr").write_text("", encoding="utf-8")
 
     res_str = service.handle_review_batch(
         {

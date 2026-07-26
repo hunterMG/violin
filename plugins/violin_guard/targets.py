@@ -225,7 +225,6 @@ def resolve_target(
     if not target_val:
         return None
 
-    # Extract the requested field from a URL
     if "://" in target_val and field in ("ip", "host"):
         with contextlib.suppress(ValueError):
             parsed = urlsplit(target_val)
@@ -446,11 +445,32 @@ def _is_ip_network(value: str) -> bool:
     return True
 
 
+def resolve_command_targets(
+    command: str,
+    primary_target: str | None = None,
+    scope_data: dict[str, Any] | None = None,
+) -> set[str]:
+    """Extract and normalise candidate targets from command, primary target, or scope fallback."""
+    targets = {normalise_target(t) for t in extract_target_candidates(command)}
+    if primary_target:
+        targets.add(normalise_target(primary_target))
+
+    if not targets and isinstance(scope_data, dict):
+        targets_sec = scope_data.get("targets", {})
+        if isinstance(targets_sec, dict):
+            for t in targets_sec.get("ip_addresses", []) or []:
+                if isinstance(t, str) and t.strip():
+                    targets.add(normalise_target(t))
+
+    return targets
+
+
 __all__ = [
     "TargetCheckResult",
     "check_scope_targets",
     "extract_target_candidates",
     "normalise_target",
+    "resolve_command_targets",
     "resolve_target",
     "scope_hosts",
 ]

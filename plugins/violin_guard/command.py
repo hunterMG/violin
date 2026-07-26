@@ -19,8 +19,8 @@ from .results import GuardResult
 from .skill_receipts import get_binding
 from .targets import (
     check_scope_targets,
-    extract_target_candidates,
     normalise_target,
+    resolve_command_targets,
 )
 
 __all__ = [
@@ -247,7 +247,11 @@ def check_skill_binding(eng_dir: Path, task_id: str, session_id: str, phase: Pha
 
 
 def check_hypothesis_freshness(
-    eng_dir: Path, phase: Phase, command: str, primary_target: str | None = None
+    eng_dir: Path,
+    phase: Phase,
+    command: str,
+    primary_target: str | None = None,
+    hypothesis_id: str | None = None,
 ) -> HypothesisResult:
     """Ensure hypotheses exist and are fresh for phases that require them."""
     result = HypothesisResult()
@@ -269,9 +273,16 @@ def check_hypothesis_freshness(
         Phase.PRIVESC: {Phase.EXPLOITATION, Phase.POST_EXPLOITATION, Phase.PRIVESC},
         Phase.FLAGS: {Phase.PRIVESC, Phase.FLAGS},
     }.get(phase, {phase})
-    targets = {normalise_target(target) for target in extract_target_candidates(command)}
-    if primary_target:
-        targets.add(normalise_target(primary_target))
+    scope_path = eng_dir / "scope" / "scope.yaml"
+    scope_data = validate_scope(scope_path).scope_data if scope_path.exists() else None
+    targets = resolve_command_targets(command, primary_target=primary_target, scope_data=scope_data)
+
+    norm_hyp_id = (
+        hypothesis_id.strip().upper().removeprefix("H-").lstrip("0") or "0"
+        if hypothesis_id
+        else None
+    )
+
     relevant = []
     for hypothesis in hyps:
         if hypothesis.canonical_status() == "Rejected" or not hypothesis.target:
@@ -281,6 +292,12 @@ def check_hypothesis_freshness(
         except ValueError:
             continue
         target = normalise_target(hypothesis.target)
+
+        if norm_hyp_id is not None:
+            h_id = hypothesis.id.strip().upper().removeprefix("H-").lstrip("0") or "0"
+            if h_id != norm_hyp_id:
+                continue
+
         if hypothesis_phase in acceptable_phases and (not targets or target in targets):
             relevant.append(hypothesis)
     if not relevant:
@@ -289,11 +306,11 @@ def check_hypothesis_freshness(
             for h in hyps
             if h.canonical_status() != "Rejected" and h.target
         ]
-        result.add_error(
-            f"phase {phase.value} requires a non-rejected hypothesis matching the command target; "
-            f"parsed targets: {', '.join(sorted(targets)) or 'none'}; "
-            f"available hypotheses: {', '.join(eligible) or 'none'}"
-        )
+        msg = f"phase {phase.value} requires a non-rejected hypothesis matching the command target"
+        if norm_hyp_id:
+            msg += f" (linked H-{norm_hyp_id.zfill(3)})"
+        msg += f"; parsed targets: {', '.join(sorted(targets)) or 'none'}; available hypotheses: {', '.join(eligible) or 'none'}"
+        result.add_error(msg)
         return result
 
     if phase in {
@@ -386,7 +403,7 @@ def check_command(args: CheckCommandArgs) -> CheckResult:
     artifact_result = check_local_artifact_paths(args.command)
     result.infos.extend(artifact_result.infos)
 
-    # 3. Session identity (legacy markers may infer identity, but never authorize work).
+    # 3. Session identity gate
     session_id = state.resolve_session_id(eng_dir, args.session_id)
     if not session_id:
         result.add_error("session_id is required for the skill receipt gate")
@@ -396,6 +413,7 @@ def check_command(args: CheckCommandArgs) -> CheckResult:
     ptt_validation = ptt.validate_ptt(ptt.parse_ptt(ptt_path))
     result.errors.extend(ptt_validation.errors)
     result.warnings.extend(ptt_validation.warnings)
+    active_task_hyp_id = None
     if ptt_validation.active_task:
         result.infos.append(f"active PTT task: {ptt_validation.active_task}")
         active_task = ptt.find_active_task(ptt_validation.tasks)
@@ -406,6 +424,10 @@ def check_command(args: CheckCommandArgs) -> CheckResult:
                 "pause the current task and start one under the requested Phase heading with "
                 "violin_record_ptt"
             )
+        if active_task and active_task.note:
+            hyp_match = re.search(r"\bH-\d+\b", active_task.note, re.IGNORECASE)
+            if hyp_match:
+                active_task_hyp_id = hyp_match.group(0).upper()
         if active_task and session_id:
             binding_result = check_skill_binding(eng_dir, active_task.id, session_id, phase)
             result.errors.extend(binding_result.errors)
@@ -430,7 +452,9 @@ def check_command(args: CheckCommandArgs) -> CheckResult:
     result.infos.extend(h_infos)
 
     # 6. Hypothesis freshness
-    hyp_result = check_hypothesis_freshness(eng_dir, phase, args.command, args.target)
+    hyp_result = check_hypothesis_freshness(
+        eng_dir, phase, args.command, args.target, hypothesis_id=active_task_hyp_id
+    )
     result.errors.extend(hyp_result.errors)
     result.warnings.extend(hyp_result.warnings)
     result.infos.extend(hyp_result.infos)

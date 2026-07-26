@@ -19,114 +19,21 @@ import re
 import shlex
 from urllib.parse import urlsplit
 
-_SHELL_WRAPPERS = frozenset({"bash", "cmd", "fish", "powershell", "pwsh", "sh", "zsh"})
-_SCRIPT_INTERPRETERS = _SHELL_WRAPPERS | {
-    "node",
-    "perl",
-    "python",
-    "python3",
-    "ruby",
-}
-_PACKAGE_OR_SOURCE_COMMANDS = frozenset(
-    {"cargo", "curl", "fetch", "git", "go", "npm", "pip", "pip3", "pnpm", "uv", "wget", "yarn"}
-)
-_LOCAL_COMMANDS = frozenset(
-    {
-        "awk",
-        "cat",
-        "cmake",
-        "cp",
-        "date",
-        "diff",
-        "dir",
-        "echo",
-        "false",
-        "find",
-        "grep",
-        "head",
-        "hermes",
-        "ls",
-        "make",
-        "mkdir",
-        "mv",
-        "printf",
-        "pwd",
-        "pytest",
-        "rg",
-        "ripgrep",
-        "rm",
-        "sed",
-        "sort",
-        "tail",
-        "touch",
-        "true",
-        "uniq",
-        "wc",
-    }
-)
-_COMMAND_SPLIT_RE = re.compile(r"&&|\|\||[;|\n]")
-_IPV4_RE = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
-_DOMAIN_RE = re.compile(
-    r"(?<![\w.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?![\w.-])",
-    re.IGNORECASE,
-)
-_URL_RE = re.compile(r"\b(?:https?|ftp|wss?|file)://[^\s'\"<>]+", re.IGNORECASE)
-_KNOWN_SOURCE_HOSTS = frozenset(
-    {
-        "bitbucket.org",
-        "crates.io",
-        "files.pythonhosted.org",
-        "gist.github.com",
-        "gist.githubusercontent.com",
-        "github.com",
-        "gitlab.com",
-        "go.dev",
-        "objects.githubusercontent.com",
-        "proxy.golang.org",
-        "pypi.org",
-        "raw.githubusercontent.com",
-        "registry.npmjs.org",
-    }
-)
-_NETWORK_PATH_RE = re.compile(r"/(?:dev/)?(?:tcp|udp)/", re.IGNORECASE)
-_NETWORK_MODULE_RE = re.compile(
-    r"\b(?:http\.server|requests|httpx|urllib(?:\.request)?|socket(?:server)?|scapy|paramiko)\b",
-    re.IGNORECASE,
-)
-_COMMAND_SUBSTITUTION_RE = re.compile(r"\$\(|`")
-_SUSPICIOUS_SCRIPT_RE = re.compile(
-    r"\b(?:attack|exploit|fuzz|payload|poc|probe|recon|scan|scanner)\b",
-    re.IGNORECASE,
-)
-_LOCAL_FILE_SUFFIXES = frozenset(
-    {
-        ".py",
-        ".pyw",
-        ".sh",
-        ".bash",
-        ".zsh",
-        ".ps1",
-        ".js",
-        ".mjs",
-        ".cjs",
-        ".rb",
-        ".pl",
-        ".log",
-        ".txt",
-        ".json",
-        ".yaml",
-        ".yml",
-        ".xml",
-        ".csv",
-        ".tsv",
-        ".out",
-        ".err",
-        ".dat",
-        ".conf",
-        ".cfg",
-        ".ini",
-        ".md",
-    }
+from .terminal_rules import (
+    _COMMAND_SPLIT_RE,
+    _COMMAND_SUBSTITUTION_RE,
+    _DOMAIN_RE,
+    _IPV4_RE,
+    _KNOWN_SOURCE_HOSTS,
+    _LOCAL_COMMANDS,
+    _LOCAL_FILE_SUFFIXES,
+    _NETWORK_MODULE_RE,
+    _NETWORK_PATH_RE,
+    _PACKAGE_OR_SOURCE_COMMANDS,
+    _SCRIPT_INTERPRETERS,
+    _SHELL_WRAPPERS,
+    _SUSPICIOUS_SCRIPT_RE,
+    _URL_RE,
 )
 
 
@@ -192,17 +99,14 @@ def _word_is_target_literal(word: str) -> bool:
     if authority.count(":") == 1:
         authority = authority.split(":", 1)[0]
 
-    # IPv4 match
     if _IPV4_RE.fullmatch(authority):
         return authority not in {"127.0.0.1", "0.0.0.0"}
 
-    # IPv6 match
     with contextlib.suppress(ValueError):
         clean_ip = authority.strip("[]")
         ip_obj = ipaddress.ip_address(clean_ip)
         return not ip_obj.is_loopback and not ip_obj.is_unspecified
 
-    # URL match
     if "://" in value:
         try:
             hostname = urlsplit(value).hostname

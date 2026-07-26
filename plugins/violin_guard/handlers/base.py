@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 def _running_background_command(eng_dir: str, command: str) -> bool:
     """Return True if command is currently running as an acknowledged background process."""
-    exec_dir = _eng_path(eng_dir) / "state" / "executions"
+    exec_dir = _eng_path(eng_dir) / "evidence" / "executions"
     if not exec_dir.exists():
         return False
     for path in exec_dir.glob("*.json"):

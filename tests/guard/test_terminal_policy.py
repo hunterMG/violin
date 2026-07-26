@@ -533,4 +533,3 @@ def test_local_script_syntax_and_test_checks_are_allowed(raw_command: str) -> No
 )
 def test_expanded_local_file_tools_are_allowed(raw_command: str) -> None:
     assert _pre_tool_call_hook(tool_name="terminal", args={"command": raw_command}) is None
-

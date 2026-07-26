@@ -42,6 +42,7 @@ _ARTIFACT_DIRECTORIES = (
     "evidence/flags",
     "evidence/reporting",
     "evidence/retrospective",
+    "evidence/executions",
 )
 
 

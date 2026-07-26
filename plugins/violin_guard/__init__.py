@@ -217,13 +217,7 @@ def _post_tool_call_hook(tool_name=None, args=None, result=None, duration_ms=0, 
 
 
 def _pre_llm_call_hook(session_id=None, eng_dir=None, **kwargs):
-    """Lifecycle heartbeat: tick the message counter before each LLM call.
-
-    This is the *supplementary* heartbeat — it advances the message cadence
-    (used to surface periodic review locks) but never replaces the authoritative
-    command gate. When ``eng_dir`` is available we record the tick; otherwise we
-    simply return without mutating state.
-    """
+    """Lifecycle heartbeat: tick the message counter before each LLM call."""
     if eng_dir:
         with contextlib.suppress(Exception):
             state.tick_message(str(eng_dir))
@@ -235,7 +229,7 @@ def _pre_llm_call_hook(session_id=None, eng_dir=None, **kwargs):
 
 def _on_session_reset_hook(session_id=None, eng_dir=None, **kwargs) -> None:
     """Hook: session reset (context compression, /goal set, etc.)."""
-    eng_dir = eng_dir or _SESSION_ENGAGEMENTS.get(str(session_id or ""))
+    eng_dir = eng_dir or (_SESSION_ENGAGEMENTS.get(str(session_id)) if session_id else None)
     if eng_dir:
         with contextlib.suppress(Exception):
             state.tick_message(str(eng_dir))

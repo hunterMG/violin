@@ -14,9 +14,7 @@ from typing import Any
 
 from filelock import FileLock
 
-# ---------------------------------------------------------------------------
 # Constants
-# ---------------------------------------------------------------------------
 
 DEFAULT_SYNC_CREDIT = 5
 COMMAND_INTERVAL = 50
@@ -41,9 +39,7 @@ _SESSION_FILE = "session.json"
 _SEMANTIC_FILE = "semantic-progress.json"
 
 
-# ---------------------------------------------------------------------------
 # Path helpers
-# ---------------------------------------------------------------------------
 
 
 def _eng_root() -> Path:
@@ -57,9 +53,19 @@ def _eng_root() -> Path:
 
 def resolve_eng_dir(eng_dir: str | Path) -> Path:
     """Resolve an engagement directory path (absolute or relative to profile root)."""
+    if not str(eng_dir).strip() or str(eng_dir).strip() == ".":
+        cwd = Path.cwd().resolve()
+        if (cwd / "scope" / "scope.yaml").exists() or (cwd / "hypotheses.md").exists():
+            return cwd
+        return _eng_root()
+
     path = Path(eng_dir).expanduser()
     if not path.is_absolute():
-        path = _eng_root() / path
+        profile_candidate = (_eng_root() / path).resolve()
+        cwd_candidate = (Path.cwd() / path).resolve()
+        if not profile_candidate.exists() and cwd_candidate.exists():
+            return cwd_candidate
+        return profile_candidate
     return path.resolve()
 
 
@@ -84,7 +90,9 @@ def resolve_session_id(eng_dir: str | Path, session_id: str | None = None) -> st
 
 def record_session_id(eng_dir: str | Path, session_id: str | None) -> None:
     if session_id and session_id.strip():
-        atomic_json(_state_dir(eng_dir) / _SESSION_FILE, {"session_id": session_id.strip()})
+        path = _state_dir(eng_dir) / _SESSION_FILE
+        with lock_file(path):
+            atomic_json(path, {"session_id": session_id.strip()})
 
 
 def _state_dir(eng_dir: str | Path) -> Path:
@@ -93,9 +101,7 @@ def _state_dir(eng_dir: str | Path) -> Path:
     return p
 
 
-# ---------------------------------------------------------------------------
 # Storage primitives
-# ---------------------------------------------------------------------------
 
 
 @contextmanager
@@ -108,12 +114,26 @@ def lock_file(path: Path):
 
 
 def read_json(path: Path) -> dict[str, Any]:
-    """Read a JSON document, returning an empty dict on error or non-dict root."""
+    """Read a JSON document, returning an empty dict on missing file or non-dict root.
+
+    Raises OSError or json.JSONDecodeError on corrupt/locked file reads when the file exists,
+    preventing mutate_json from overwriting existing state with empty dictionaries.
+    """
+    if not path.exists():
+        return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError):
-        return {}
+        # On read failure when file exists, attempt up to 3 retries for transient locks
+        for attempt in range(3):
+            time.sleep(0.02 * (attempt + 1))
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                return data if isinstance(data, dict) else {}
+            except (OSError, json.JSONDecodeError):
+                pass
+        raise
 
 
 def atomic_json(path: Path, data: dict[str, Any]) -> None:
@@ -145,9 +165,7 @@ def mutate_json(path: Path, mutation) -> Any:
         return result
 
 
-# ---------------------------------------------------------------------------
 # Local command classification
-# ---------------------------------------------------------------------------
 
 
 def is_local_bookkeeping_command(command: str) -> bool:
@@ -156,9 +174,7 @@ def is_local_bookkeeping_command(command: str) -> bool:
     return bool(leading) and leading[0] in LOCAL_TOOLS
 
 
-# ---------------------------------------------------------------------------
 # Sync credit / pending sync
-# ---------------------------------------------------------------------------
 
 
 def _sync_path(eng_dir: str | Path) -> Path:

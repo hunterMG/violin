@@ -155,18 +155,34 @@ def _preview(path: Path) -> str:
         return handle.read(PREVIEW_BYTES).decode("utf-8", errors="replace")
 
 
+def _find_execution_manifest(engagement: Path, execution_id: str) -> Path | None:
+    evidence_dir = engagement / "evidence" / "executions"
+    if not evidence_dir.exists():
+        return None
+    short_id = execution_id[:8]
+    candidates = list(evidence_dir.glob(f"*-{short_id}-*.json"))
+    direct = evidence_dir / f"{execution_id}.json"
+    if direct.exists() and direct not in candidates:
+        candidates.append(direct)
+    for path in candidates:
+        with state.lock_file(path):
+            data = state.read_json(path)
+            if data.get("execution_id") == execution_id:
+                return path
+    return None
+
+
 def _finalize_background(
     *,
     engagement: Path,
-    registry_path: Path,
     manifest_path: Path,
     command: str,
     phase: str,
     exit_code: int,
     status_name: str,
 ) -> dict[str, Any]:
-    with state.lock_file(registry_path):
-        record = state.read_json(registry_path)
+    with state.lock_file(manifest_path):
+        record = state.read_json(manifest_path)
         if record.get("history_recorded"):
             return record
         if record.get("cancel_requested"):
@@ -190,7 +206,6 @@ def _finalize_background(
         )
         receipt["history_recorded"] = True
         state.atomic_json(manifest_path, receipt)
-        state.atomic_json(registry_path, receipt)
         return receipt
 
 
@@ -198,7 +213,6 @@ def _monitor_background(
     proc: subprocess.Popen,
     *,
     engagement: Path,
-    registry_path: Path,
     manifest_path: Path,
     stdout_path: Path,
     stderr_path: Path,
@@ -209,7 +223,7 @@ def _monitor_background(
     deadline = time.monotonic() + timeout
     status_name = "completed"
     while proc.poll() is None:
-        current = state.read_json(registry_path)
+        current = state.read_json(manifest_path)
         if current.get("cancel_requested"):
             status_name = "cancelled"
             _terminate_process(proc)
@@ -231,7 +245,6 @@ def _monitor_background(
         exit_code = proc.wait(timeout=5)
     _finalize_background(
         engagement=engagement,
-        registry_path=registry_path,
         manifest_path=manifest_path,
         command=command,
         phase=phase,
@@ -251,7 +264,6 @@ def _start_background_monitor(
     *,
     record: dict[str, Any],
     engagement: Path,
-    registry_path: Path,
     manifest_path: Path,
     stdout_path: Path,
     stderr_path: Path,
@@ -272,7 +284,6 @@ def _start_background_monitor(
         kwargs={
             "proc": proc,
             "engagement": engagement,
-            "registry_path": registry_path,
             "manifest_path": manifest_path,
             "stdout_path": stdout_path,
             "stderr_path": stderr_path,
@@ -319,7 +330,6 @@ def execute(
     stdout_path = evidence_dir / f"{stem}.stdout.txt"
     stderr_path = evidence_dir / f"{stem}.stderr.txt"
     manifest_path = evidence_dir / f"{stem}.json"
-    registry_path = engagement / "state" / "executions" / f"{execution_id}.json"
     rel_manifest = manifest_path.relative_to(engagement).as_posix()
     rel_stdout = stdout_path.relative_to(engagement).as_posix()
     rel_stderr = stderr_path.relative_to(engagement).as_posix()
@@ -345,7 +355,7 @@ def execute(
             "stderr": rel_stderr,
         },
     }
-    state.atomic_json(registry_path, record)
+    state.atomic_json(manifest_path, record)
 
     timed_out = False
     output_limited = False
@@ -372,14 +382,13 @@ def execute(
             proc = subprocess.Popen(process_argv, **popen_kwargs)
 
             record.update(status="running", pid=proc.pid)
-            state.atomic_json(registry_path, record)
+            state.atomic_json(manifest_path, record)
 
             if background:
                 return _start_background_monitor(
                     proc,
                     record=record,
                     engagement=engagement,
-                    registry_path=registry_path,
                     manifest_path=manifest_path,
                     stdout_path=stdout_path,
                     stderr_path=stderr_path,
@@ -392,7 +401,7 @@ def execute(
 
             deadline = time.monotonic() + timeout
             while proc.poll() is None:
-                current = state.read_json(registry_path)
+                current = state.read_json(manifest_path)
                 if current.get("cancel_requested"):
                     cancelled = True
                     _terminate_pid(proc.pid)
@@ -435,7 +444,6 @@ def execute(
         "output_limited": output_limited,
     }
     state.atomic_json(manifest_path, receipt)
-    state.atomic_json(registry_path, receipt)
 
     append_history(engagement, command, phase, exit_code, rel_manifest)
 
@@ -471,14 +479,16 @@ def status(eng_dir: str, execution_id: str) -> dict[str, Any]:
     engagement = _resolve_engagement(eng_dir)
     if not re.fullmatch(r"[0-9a-fA-F-]{36}", execution_id):
         raise ValueError("invalid execution_id")
-    path = engagement / "state" / "executions" / f"{execution_id}.json"
+    manifest_path = _find_execution_manifest(engagement, execution_id)
+    if not manifest_path:
+        raise ValueError("execution not found")
     # Background finalization replaces this file atomically while status calls
     # may arrive from another thread. On Windows, reading during the replace
     # can transiently raise an OSError, which read_json intentionally maps to
     # an empty document. Serialize the read with the finalizer's lock so a
     # tracked execution is never misreported as missing.
-    with state.lock_file(path):
-        record = state.read_json(path)
+    with state.lock_file(manifest_path):
+        record = state.read_json(manifest_path)
     if not record:
         raise ValueError("execution not found")
     if record.get("background") and record.get("status") == "running":
@@ -486,8 +496,7 @@ def status(eng_dir: str, execution_id: str) -> dict[str, Any]:
         if isinstance(pid, int) and pid > 0 and not _pid_is_running(pid):
             record = _finalize_background(
                 engagement=engagement,
-                registry_path=path,
-                manifest_path=engagement / record["evidence_paths"]["manifest"],
+                manifest_path=manifest_path,
                 command=record["command"],
                 phase=record["phase"],
                 exit_code=-1,
@@ -506,8 +515,8 @@ def _pid_is_running(pid: int) -> bool:
 
 def cancel(eng_dir: str, execution_id: str) -> dict[str, Any]:
     engagement = _resolve_engagement(eng_dir)
-    path = engagement / "state" / "executions" / f"{execution_id}.json"
     record = status(str(engagement), execution_id)
+    manifest_path = engagement / record["evidence_paths"]["manifest"]
     if record.get("status") not in {"starting", "running"}:
         return {**record, "cancel_requested": False, "message": "execution is not running"}
 
@@ -517,7 +526,7 @@ def cancel(eng_dir: str, execution_id: str) -> dict[str, Any]:
 
     record["cancel_requested"] = True
     record["cancel_requested_at"] = _utc_now()
-    state.atomic_json(path, record)
+    state.atomic_json(manifest_path, record)
     _terminate_pid(pid)
 
     return {**record, "message": "cancellation requested for tracked process group"}
