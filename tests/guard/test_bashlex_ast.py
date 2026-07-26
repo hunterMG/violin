@@ -1,7 +1,5 @@
 """Unit tests for bashlex AST parsing and terminal policy classification."""
 
-import pytest
-
 from plugins.violin_guard import bash_ast, terminal_policy
 
 

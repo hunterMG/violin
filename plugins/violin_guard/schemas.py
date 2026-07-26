@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from typing import Any, Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import state
-
 
 # ---------------------------------------------------------------------------
 # Pydantic v2 Models
@@ -77,9 +77,7 @@ class RecordHypothesisArgsModel(BaseModel):
             " no-results/unavailable outcomes are allowed."
         ),
     )
-    test_command: str = Field(
-        "", description="Exact syntax tested, including argument order"
-    )
+    test_command: str = Field("", description="Exact syntax tested, including argument order")
     test_response: str = Field("", description="Exact decisive response or error")
     verification_status: str = ""
     rejection_reason: str = Field(
@@ -112,8 +110,7 @@ class ExecArgsModel(BaseModel):
     background: bool = Field(
         False,
         description=(
-            "Run as a tracked background process; use status/cancel for lifecycle"
-            " management"
+            "Run as a tracked background process; use status/cancel for lifecycle management"
         ),
     )
 
@@ -297,9 +294,7 @@ class TargetArgsModel(BaseModel):
     eng_dir: str = Field(
         ..., description="engagement dir (required; target resolution is engagement-scoped)"
     )
-    scope: str = Field(
-        "", description="explicit scope.yaml path (else $ENG_DIR/scope/scope.yaml)"
-    )
+    scope: str = Field("", description="explicit scope.yaml path (else $ENG_DIR/scope/scope.yaml)")
     host: str = Field("", description="in-scope IP/CIDR to resolve")
     role: str = Field("", description="named role from scope.yaml targets.roles (e.g. web)")
     field: Literal["ip", "url", "host"] = Field("ip", description="what to print (default ip)")

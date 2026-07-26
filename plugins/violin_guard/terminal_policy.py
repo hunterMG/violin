@@ -198,9 +198,7 @@ def _has_target_literal_in_segment(seg: CommandSegment) -> bool:
     words = seg.words
     executable = seg.executable
     skip_code = (
-        executable in _SCRIPT_INTERPRETERS
-        and executable not in _SHELL_WRAPPERS
-        and "-c" in words
+        executable in _SCRIPT_INTERPRETERS and executable not in _SHELL_WRAPPERS and "-c" in words
     )
     c_index = words.index("-c") if skip_code else -1
     for index, word in enumerate(words):
@@ -252,11 +250,7 @@ def _is_local_compilation_or_test(seg: CommandSegment) -> bool:
             "doctest",
         }:
             return True
-    return (
-        "py_compile" in seg.raw_text
-        or "pytest" in lower_words
-        or "unittest" in lower_words
-    )
+    return "py_compile" in seg.raw_text or "pytest" in lower_words or "unittest" in lower_words
 
 
 def _block_terminal_segment(seg: CommandSegment) -> str | None:
