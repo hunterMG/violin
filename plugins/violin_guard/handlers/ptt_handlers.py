@@ -73,9 +73,7 @@ def _task_row_contains(path: Path, task_id: str, marker: str) -> bool:
     return False
 
 
-def _validate_review_identity(
-    a: dict, pending: dict
-) -> tuple[str, str, str, str, str, str]:
+def _validate_review_identity(a: dict, pending: dict) -> tuple[str, str, str, str, str, str]:
     """Extract and validate core identity fields from a review request.
 
     Returns (eng_dir, task_id, note, status, batch_id, captured_task).
@@ -458,9 +456,7 @@ def _execute_batch_review(engagement: Path, pending: dict, a: dict, skill: str) 
         )
     if not context["already_recorded"]:
         review_note = f"{context['note']} {context['marker']}"
-        ptt.update_task(
-            context["ptt_path"], context["task_id"], context["status"], review_note
-        )
+        ptt.update_task(context["ptt_path"], context["task_id"], context["status"], review_note)
     batch_evidence = findings._batch_evidence(engagement, pending)
     supplied_evidence = [str(item) for item in (a.get("evidence_paths") or [])]
     evidence_paths = sorted(set(supplied_evidence) | set(batch_evidence))

@@ -156,6 +156,7 @@ def test_burst_continues_past_review_required_command(tmp_path: Path, monkeypatc
     eng = _engagement(tmp_path)
     checks = iter((CheckResult(warnings=["review first"]), CheckResult()))
     from plugins.violin_guard.handlers import exec_handlers
+
     monkeypatch.setattr(exec_handlers, "_check_command_internal", lambda _args: next(checks))
     executed: list[str] = []
 

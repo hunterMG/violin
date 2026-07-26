@@ -181,9 +181,7 @@ def _check_heavy_linter_and_tests(root: Path, result: ReleaseCheckResult) -> Non
             text=True,
         )
         if ruff.returncode != 0:
-            result.add_error(
-                "ruff check failed:\n" + (ruff.stdout or ruff.stderr).strip()[:2000]
-            )
+            result.add_error("ruff check failed:\n" + (ruff.stdout or ruff.stderr).strip()[:2000])
         else:
             result.add_info("ruff check passed")
     except FileNotFoundError:

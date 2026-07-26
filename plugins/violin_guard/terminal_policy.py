@@ -193,8 +193,7 @@ def _word_is_target_literal(word: str) -> bool:
         try:
             hostname = urlsplit(value).hostname
             return bool(
-                hostname
-                and hostname.lower() not in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+                hostname and hostname.lower() not in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
             )
         except ValueError:
             return True
