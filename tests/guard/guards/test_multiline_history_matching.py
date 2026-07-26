@@ -1,5 +1,5 @@
-from pathlib import Path
 import json
+from pathlib import Path
 
 from plugins.violin_guard import bootstrap, history, state
 from plugins.violin_guard import handlers as service
@@ -34,7 +34,9 @@ def test_append_history_sanitizes_multiline_commands(tmp_path: Path) -> None:
 
     hist_file = eng / "state" / "history.md"
     assert hist_file.exists()
-    record_lines = [line for line in hist_file.read_text(encoding="utf-8").splitlines() if line.startswith("- ")]
+    record_lines = [
+        line for line in hist_file.read_text(encoding="utf-8").splitlines() if line.startswith("- ")
+    ]
     assert len(record_lines) == 1  # Formatted as single line in history.md
     assert "cd /var/www curl -s http://example.com head -n 10 index.html" in record_lines[0]
 

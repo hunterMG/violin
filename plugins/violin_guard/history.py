@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .state import lock_file, read_json, resolve_eng_dir
+from .state import lock_file, resolve_eng_dir
 
 _COMMAND_MARKER = " | command="
 _COMMAND_LENGTH_MARKER = " | command_length="
@@ -117,7 +117,8 @@ def check_history_staleness(
     last_line = lines[-1]
     recorded_command = _recorded_command(last_line)
     is_repeat = (recorded_command == command) or (
-        recorded_command is not None and normalize_command(recorded_command) == normalize_command(command)
+        recorded_command is not None
+        and normalize_command(recorded_command) == normalize_command(command)
     )
     if is_repeat and not allow_pending_repeat:
         errors.append(
@@ -135,4 +136,3 @@ __all__ = [
     "history_contains",
     "check_history_staleness",
 ]
-

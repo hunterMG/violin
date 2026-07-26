@@ -9,7 +9,6 @@ import contextlib
 import os
 import re
 import shutil
-import signal
 import subprocess
 import threading
 import time
@@ -17,6 +16,8 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+import psutil
 
 from . import state
 from .history import append_history
@@ -119,35 +120,29 @@ def _command_argv(
 
 
 def _terminate_pid(pid: int) -> None:
+    """Recursively terminate a process tree by PID using psutil."""
     if pid <= 0:
         return
-    if os.name == "nt":
-        subprocess.run(
-            ["taskkill", "/PID", str(pid), "/T", "/F"],
-            capture_output=True,
-            check=False,
-        )
-    else:
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(pid, signal.SIGTERM)
-            time.sleep(0.2)
-            os.killpg(pid, signal.SIGKILL)
+    try:
+        parent = psutil.Process(pid)
+        children = parent.children(recursive=True)
+        procs = children + [parent]
+        for proc in procs:
+            with contextlib.suppress(psutil.NoSuchProcess):
+                proc.terminate()
+        _, alive = psutil.wait_procs(procs, timeout=2)
+        for proc in alive:
+            with contextlib.suppress(psutil.NoSuchProcess):
+                proc.kill()
+    except psutil.NoSuchProcess:
+        pass
 
 
 def _terminate_process(proc: subprocess.Popen) -> None:
-    """Terminate a process we directly own, then clean up its process group."""
-
+    """Terminate a process we directly own, including all of its child process tree."""
     if proc.poll() is not None:
         return
-    try:
-        proc.terminate()
-        proc.wait(timeout=1)
-        return
-    except (OSError, subprocess.TimeoutExpired):
-        _terminate_pid(proc.pid)
-    if proc.poll() is None:
-        with contextlib.suppress(OSError):
-            proc.kill()
+    _terminate_pid(proc.pid)
 
 
 def _preview(path: Path) -> str:
@@ -506,11 +501,7 @@ def status(eng_dir: str, execution_id: str) -> dict[str, Any]:
 
 
 def _pid_is_running(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
+    return psutil.pid_exists(pid)
 
 
 def cancel(eng_dir: str, execution_id: str) -> dict[str, Any]:
