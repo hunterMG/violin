@@ -506,3 +506,31 @@ def test_execute_code_records_tool_errors(tmp_path) -> None:
     history = (eng / "state" / "history.md").read_text(encoding="utf-8")
     assert "status=error" in history
     assert "exit_code=1" in history
+
+
+@pytest.mark.parametrize(
+    "raw_command",
+    [
+        "python -m py_compile oauth_takeover.py",
+        "python3 -m py_compile exploit.py",
+        "python -m pytest tests/test_exploit.py",
+        "python -c 'import py_compile; py_compile.compile(\"exploit.py\")'",
+    ],
+)
+def test_local_script_syntax_and_test_checks_are_allowed(raw_command: str) -> None:
+    assert _pre_tool_call_hook(tool_name="terminal", args={"command": raw_command}) is None
+
+
+@pytest.mark.parametrize(
+    "raw_command",
+    [
+        "grep 10.10.10.10 access.log",
+        "head -n 20 exploit.log",
+        "ls -la",
+        "rg 'function' .",
+        "diff file1.py file2.py",
+    ],
+)
+def test_expanded_local_file_tools_are_allowed(raw_command: str) -> None:
+    assert _pre_tool_call_hook(tool_name="terminal", args={"command": raw_command}) is None
+

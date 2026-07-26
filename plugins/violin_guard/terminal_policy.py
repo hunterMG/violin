@@ -32,22 +32,36 @@ _PACKAGE_OR_SOURCE_COMMANDS = frozenset(
 )
 _LOCAL_COMMANDS = frozenset(
     {
+        "awk",
         "cat",
         "cmake",
         "cp",
         "date",
+        "diff",
+        "dir",
         "echo",
         "false",
+        "find",
+        "grep",
+        "head",
         "hermes",
+        "ls",
         "make",
         "mkdir",
         "mv",
         "printf",
         "pwd",
         "pytest",
+        "rg",
+        "ripgrep",
         "rm",
+        "sed",
+        "sort",
+        "tail",
         "touch",
         "true",
+        "uniq",
+        "wc",
     }
 )
 _COMMAND_SPLIT_RE = re.compile(r"&&|\|\||[;|\n]")
@@ -259,6 +273,22 @@ def _dynamic_init_host(segment: str) -> bool:
     return False
 
 
+def _is_local_compilation_or_test(segment: str) -> bool:
+    """Return True if the command is a local syntax compile check or test framework invocation."""
+    words = _command_words(segment)
+    lower_words = [w.lower() for w in words]
+    if "-m" in lower_words:
+        idx = lower_words.index("-m")
+        if idx + 1 < len(lower_words) and lower_words[idx + 1] in {
+            "py_compile",
+            "pytest",
+            "unittest",
+            "doctest",
+        }:
+            return True
+    return "py_compile" in segment or "pytest" in lower_words or "unittest" in lower_words
+
+
 def _block_terminal_segment(segment: str) -> str | None:
     if _NETWORK_PATH_RE.search(segment):
         return _message("network socket path detected in the raw terminal command")
@@ -301,7 +331,11 @@ def _block_terminal_segment(segment: str) -> str | None:
     if executable not in _LOCAL_COMMANDS and _has_target_literal(segment):
         return _message("target host literal detected in the raw terminal command")
 
-    if executable in _SCRIPT_INTERPRETERS and _SUSPICIOUS_SCRIPT_RE.search(segment):
+    if (
+        executable in _SCRIPT_INTERPRETERS
+        and _SUSPICIOUS_SCRIPT_RE.search(segment)
+        and not _is_local_compilation_or_test(segment)
+    ):
         return _message("assessment script detected in the raw terminal command")
 
     return None
