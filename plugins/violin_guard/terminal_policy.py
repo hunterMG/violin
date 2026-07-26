@@ -16,61 +16,127 @@ from __future__ import annotations
 import contextlib
 import ipaddress
 import re
-import shlex
 from urllib.parse import urlsplit
 
-from .terminal_rules import (
-    _COMMAND_SPLIT_RE,
-    _COMMAND_SUBSTITUTION_RE,
-    _DOMAIN_RE,
-    _IPV4_RE,
-    _KNOWN_SOURCE_HOSTS,
-    _LOCAL_COMMANDS,
-    _LOCAL_FILE_SUFFIXES,
-    _NETWORK_MODULE_RE,
-    _NETWORK_PATH_RE,
-    _PACKAGE_OR_SOURCE_COMMANDS,
-    _SCRIPT_INTERPRETERS,
-    _SHELL_WRAPPERS,
-    _SUSPICIOUS_SCRIPT_RE,
-    _URL_RE,
+from .bash_ast import CommandSegment, parse_bash_segments
+
+# ---------------------------------------------------------------------------
+# Rule Sets & Pattern Definitions
+# ---------------------------------------------------------------------------
+
+_SHELL_WRAPPERS = frozenset({"bash", "cmd", "fish", "powershell", "pwsh", "sh", "zsh"})
+_SCRIPT_INTERPRETERS = _SHELL_WRAPPERS | {
+    "node",
+    "perl",
+    "python",
+    "python3",
+    "ruby",
+}
+_PACKAGE_OR_SOURCE_COMMANDS = frozenset(
+    {"cargo", "curl", "fetch", "git", "go", "npm", "pip", "pip3", "pnpm", "uv", "wget", "yarn"}
+)
+_LOCAL_COMMANDS = frozenset(
+    {
+        "awk",
+        "cat",
+        "cmake",
+        "cp",
+        "date",
+        "diff",
+        "dir",
+        "echo",
+        "false",
+        "find",
+        "grep",
+        "head",
+        "hermes",
+        "ls",
+        "make",
+        "mkdir",
+        "mv",
+        "printf",
+        "pwd",
+        "pytest",
+        "rg",
+        "ripgrep",
+        "rm",
+        "sed",
+        "sort",
+        "tail",
+        "touch",
+        "true",
+        "uniq",
+        "wc",
+    }
+)
+_IPV4_RE = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
+_DOMAIN_RE = re.compile(
+    r"(?<![\w.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?![\w.-])",
+    re.IGNORECASE,
+)
+_URL_RE = re.compile(r"\b(?:https?|ftp|wss?|file)://[^\s'\"<>]+", re.IGNORECASE)
+_KNOWN_SOURCE_HOSTS = frozenset(
+    {
+        "bitbucket.org",
+        "crates.io",
+        "files.pythonhosted.org",
+        "gist.github.com",
+        "gist.githubusercontent.com",
+        "github.com",
+        "gitlab.com",
+        "go.dev",
+        "objects.githubusercontent.com",
+        "proxy.golang.org",
+        "pypi.org",
+        "raw.githubusercontent.com",
+        "registry.npmjs.org",
+    }
+)
+_NETWORK_PATH_RE = re.compile(r"/(?:dev/)?(?:tcp|udp)/", re.IGNORECASE)
+_NETWORK_MODULE_RE = re.compile(
+    r"\b(?:http\.server|requests|httpx|urllib(?:\.request)?|socket(?:server)?|scapy|paramiko)\b",
+    re.IGNORECASE,
+)
+_COMMAND_SUBSTITUTION_RE = re.compile(r"\$\(|`")
+_SUSPICIOUS_SCRIPT_RE = re.compile(
+    r"\b(?:attack|exploit|fuzz|payload|poc|probe|recon|scan|scanner)\b",
+    re.IGNORECASE,
+)
+_LOCAL_FILE_SUFFIXES = frozenset(
+    {
+        ".py",
+        ".pyw",
+        ".sh",
+        ".bash",
+        ".zsh",
+        ".ps1",
+        ".js",
+        ".mjs",
+        ".cjs",
+        ".rb",
+        ".pl",
+        ".log",
+        ".txt",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".xml",
+        ".csv",
+        ".tsv",
+        ".out",
+        ".err",
+        ".dat",
+        ".conf",
+        ".cfg",
+        ".ini",
+        ".md",
+    }
 )
 
 
-def _command_words(segment: str) -> list[str]:
-    try:
-        return shlex.split(segment, posix=True)
-    except ValueError:
-        # An incomplete quote is not a reason to let a possibly dangerous
-        # command through.  The fallback is only used for classification.
-        return re.findall(r"[^\s]+", segment)
-
-
-def _basename(value: str) -> str:
-    return re.split(r"[/\\]", value.rsplit("=", 1)[-1])[-1].lower()
-
-
-def _first_executable(segment: str) -> str:
-    words = _command_words(segment)
-    index = 0
-    while index < len(words):
-        word = words[index]
-        lower = word.lower()
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", word):
-            index += 1
-            continue
-        if lower in {"command", "env", "exec", "nice", "sudo", "timeout"}:
-            index += 1
-            if lower == "timeout" and index < len(words):
-                index += 1
-            continue
-        return _basename(word)
-    return ""
-
-
-def _is_package_or_source_command(command: str) -> bool:
-    executable = _first_executable(command)
-    return executable in _PACKAGE_OR_SOURCE_COMMANDS
+# ---------------------------------------------------------------------------
+# Classifier Logic
+# ---------------------------------------------------------------------------
 
 
 def _url_hosts(command: str) -> list[str]:
@@ -127,33 +193,29 @@ def _word_is_target_literal(word: str) -> bool:
     return bool(_DOMAIN_RE.fullmatch(authority))
 
 
-def _has_target_literal(command: str) -> bool:
-    """Inspect shell arguments, not arbitrary source code or file paths."""
-    for segment in _COMMAND_SPLIT_RE.split(command):
-        words = _command_words(segment)
-        executable = _first_executable(segment)
-        # Shell `-c` strings are commands and must still be inspected. Source
-        # passed to language runtimes is skipped to avoid classifying an IP
-        # literal inside ordinary local code as a network action.
-        skip_code = (
-            executable in _SCRIPT_INTERPRETERS
-            and executable not in _SHELL_WRAPPERS
-            and "-c" in words
-        )
-        c_index = words.index("-c") if skip_code else -1
-        for index, word in enumerate(words):
-            if skip_code and index > c_index:
-                continue
-            if _word_is_target_literal(word):
-                return True
+def _has_target_literal_in_segment(seg: CommandSegment) -> bool:
+    """Inspect shell arguments extracted from AST."""
+    words = seg.words
+    executable = seg.executable
+    skip_code = (
+        executable in _SCRIPT_INTERPRETERS
+        and executable not in _SHELL_WRAPPERS
+        and "-c" in words
+    )
+    c_index = words.index("-c") if skip_code else -1
+    for index, word in enumerate(words):
+        if skip_code and index > c_index:
+            continue
+        if _word_is_target_literal(word):
+            return True
     return False
 
 
-def _is_violin_init_command(segment: str) -> bool:
-    """Return whether ``segment`` invokes Violin's host-local bootstrap command."""
-    if _first_executable(segment) not in {"python", "python3"}:
+def _is_violin_init_command(seg: CommandSegment) -> bool:
+    """Return whether ``seg`` invokes Violin's host-local bootstrap command."""
+    if seg.executable not in {"python", "python3"}:
         return False
-    words = _command_words(segment)
+    words = seg.words
     for index, word in enumerate(words):
         script = word.replace("\\", "/").removeprefix("./")
         if (
@@ -165,9 +227,9 @@ def _is_violin_init_command(segment: str) -> bool:
     return False
 
 
-def _dynamic_init_host(segment: str) -> bool:
+def _dynamic_init_host(seg: CommandSegment) -> bool:
     """Reject host indirection while allowing variables in local path arguments."""
-    words = _command_words(segment)
+    words = seg.words
     for index, word in enumerate(words):
         if word == "--host" and index + 1 < len(words):
             return "$" in words[index + 1] or "`" in words[index + 1]
@@ -177,9 +239,9 @@ def _dynamic_init_host(segment: str) -> bool:
     return False
 
 
-def _is_local_compilation_or_test(segment: str) -> bool:
+def _is_local_compilation_or_test(seg: CommandSegment) -> bool:
     """Return True if the command is a local syntax compile check or test framework invocation."""
-    words = _command_words(segment)
+    words = seg.words
     lower_words = [w.lower() for w in words]
     if "-m" in lower_words:
         idx = lower_words.index("-m")
@@ -190,22 +252,28 @@ def _is_local_compilation_or_test(segment: str) -> bool:
             "doctest",
         }:
             return True
-    return "py_compile" in segment or "pytest" in lower_words or "unittest" in lower_words
+    return (
+        "py_compile" in seg.raw_text
+        or "pytest" in lower_words
+        or "unittest" in lower_words
+    )
 
 
-def _block_terminal_segment(segment: str) -> str | None:
-    if _NETWORK_PATH_RE.search(segment):
+def _block_terminal_segment(seg: CommandSegment) -> str | None:
+    segment_text = seg.raw_text
+    executable = seg.executable
+
+    if _NETWORK_PATH_RE.search(segment_text):
         return _message("network socket path detected in the raw terminal command")
 
-    executable = _first_executable(segment)
-    if executable in _SCRIPT_INTERPRETERS and _NETWORK_MODULE_RE.search(segment):
+    if executable in _SCRIPT_INTERPRETERS and _NETWORK_MODULE_RE.search(segment_text):
         return _message("network-capable script primitive detected in the raw terminal command")
 
     # Package/source retrieval is allowed for local setup (for example git
     # clone or pip install).  URLs and host literals in all other commands are
     # treated as target interaction and must use the typed guard.
-    is_source_command = _is_package_or_source_command(segment)
-    url_hosts = _url_hosts(segment)
+    is_source_command = executable in _PACKAGE_OR_SOURCE_COMMANDS
+    url_hosts = _url_hosts(segment_text)
     if not is_source_command and url_hosts:
         return _message("URL detected in a non-package raw terminal command")
 
@@ -216,7 +284,7 @@ def _block_terminal_segment(segment: str) -> str | None:
         is_source_command
         and url_hosts
         and all(_is_known_source_host(host) for host in url_hosts)
-        and not _IPV4_RE.search(segment)
+        and not _IPV4_RE.search(segment_text)
     ):
         return None
 
@@ -224,21 +292,21 @@ def _block_terminal_segment(segment: str) -> str | None:
     # traffic, so its scope host may be provided directly. Keep the exception
     # narrow: other guard subcommands still use the normal classifier, and
     # target values hidden behind shell expansion remain blocked.
-    if _is_violin_init_command(segment):
-        if _COMMAND_SUBSTITUTION_RE.search(segment) or _dynamic_init_host(segment):
+    if _is_violin_init_command(seg):
+        if _COMMAND_SUBSTITUTION_RE.search(segment_text) or _dynamic_init_host(seg):
             return _message(
                 "dynamic init-engagement host detected; pass --host directly without "
                 "shell or file indirection"
             )
         return None
 
-    if executable not in _LOCAL_COMMANDS and _has_target_literal(segment):
+    if executable not in _LOCAL_COMMANDS and _has_target_literal_in_segment(seg):
         return _message("target host literal detected in the raw terminal command")
 
     if (
         executable in _SCRIPT_INTERPRETERS
-        and _SUSPICIOUS_SCRIPT_RE.search(segment)
-        and not _is_local_compilation_or_test(segment)
+        and _SUSPICIOUS_SCRIPT_RE.search(segment_text)
+        and not _is_local_compilation_or_test(seg)
     ):
         return _message("assessment script detected in the raw terminal command")
 
@@ -246,17 +314,11 @@ def _block_terminal_segment(segment: str) -> str | None:
 
 
 def block_terminal_command(command: str) -> str | None:
-    """Return a block message for clearly target-touching raw terminal calls.
-
-    ``None`` means the command is host-local enough to remain available through
-    the built-in terminal.  This is not a replacement for scope validation;
-    it is the escape-hatch prevention layer that forces target work through the
-    typed Violin tools.
-    """
+    """Return a block message for clearly target-touching raw terminal calls."""
     if not isinstance(command, str) or not command.strip():
         return None
 
-    for segment in _COMMAND_SPLIT_RE.split(command):
+    for segment in parse_bash_segments(command):
         if message := _block_terminal_segment(segment):
             return message
     return None

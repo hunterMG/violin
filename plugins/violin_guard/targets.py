@@ -1,7 +1,7 @@
 """Target extraction, scope enforcement, and target resolution for guarded commands.
 
-This module owns the networking-aware parsing boundary, using netaddr for IP/CIDR
-set arithmetic and yarl for RFC 3986 URL parsing.
+This module owns the networking-aware parsing boundary, using AST-based shell tokenization
+via bashlex, netaddr for IP/CIDR set arithmetic, and yarl for RFC 3986 URL parsing.
 """
 
 from __future__ import annotations
@@ -15,6 +15,8 @@ from typing import Any
 
 import netaddr
 from yarl import URL
+
+from .bash_ast import extract_all_command_words
 
 _PATH_VALUE_FLAGS = {
     "-o",
@@ -247,18 +249,8 @@ def check_scope_targets(
 
 
 def _command_tokens(command: str) -> list[str]:
-    """Tokenize a command and nested shell words."""
-    tokens = _split_shell_words(command)
-    return tokens + [
-        nested for token in tokens if " " in token for nested in _split_shell_words(token)
-    ]
-
-
-def _split_shell_words(value: str) -> list[str]:
-    try:
-        return shlex.split(value, posix=True)
-    except ValueError:
-        return value.split()
+    """Tokenize a command and nested subcommands using bashlex AST."""
+    return extract_all_command_words(command)
 
 
 def _parse_target_token(token: str) -> str | None:
