@@ -196,6 +196,8 @@ def test_local_script_paths_are_not_treated_as_hosts() -> None:
     )
     assert _pre_tool_call_hook(tool_name="terminal", args={"command": "bash ./run.py"}) is None
     assert _pre_tool_call_hook(tool_name="terminal", args={"command": "sh deploy.sh"}) is None
+    assert _pre_tool_call_hook(tool_name="terminal", args={"command": "cat exploit.log"}) is None
+    assert _pre_tool_call_hook(tool_name="terminal", args={"command": "rm -f exploit.log"}) is None
 
 
 def test_local_file_path_containing_an_ip_is_not_treated_as_a_socket() -> None:

@@ -85,7 +85,34 @@ _SUSPICIOUS_SCRIPT_RE = re.compile(
     re.IGNORECASE,
 )
 _LOCAL_FILE_SUFFIXES = frozenset(
-    {".py", ".pyw", ".sh", ".bash", ".zsh", ".ps1", ".js", ".mjs", ".cjs", ".rb", ".pl"}
+    {
+        ".py",
+        ".pyw",
+        ".sh",
+        ".bash",
+        ".zsh",
+        ".ps1",
+        ".js",
+        ".mjs",
+        ".cjs",
+        ".rb",
+        ".pl",
+        ".log",
+        ".txt",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".xml",
+        ".csv",
+        ".tsv",
+        ".out",
+        ".err",
+        ".dat",
+        ".conf",
+        ".cfg",
+        ".ini",
+        ".md",
+    }
 )
 
 
