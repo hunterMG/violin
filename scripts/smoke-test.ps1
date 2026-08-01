@@ -1,7 +1,12 @@
 $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$python = (Get-Command python -ErrorAction Stop).Source
+$venvPython = Join-Path $repoRoot ".venv\Scripts\python.exe"
+$python = if (Test-Path -LiteralPath $venvPython) {
+    $venvPython
+} else {
+    (Get-Command python -ErrorAction Stop).Source
+}
 $smokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("violin-smoke-" + [guid]::NewGuid().ToString("N"))
 $engagement = Join-Path $smokeRoot "engagement"
 
