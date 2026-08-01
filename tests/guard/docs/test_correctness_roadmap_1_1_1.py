@@ -22,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.guard.receipt_fixture import bind_active_task
+
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
 
@@ -48,7 +50,6 @@ from plugins.violin_guard import (  # noqa: E402
     execution,
     ptt,  # noqa: E402
 )
-from plugins.violin_guard.command import check_skill_load  # noqa: E402
 
 
 def _init_e2e(tmp_path, skill_file, allowed=("recon", "vuln-research", "exploitation")):
@@ -83,6 +84,7 @@ def _init_e2e(tmp_path, skill_file, allowed=("recon", "vuln-research", "exploita
         ptt.read_text(encoding="utf-8").replace("| PT-010 | [ ] |", "| PT-010 | [~] |"),
         encoding="utf-8",
     )
+    bind_active_task(eng, "ts")
     return eng
 
 
@@ -215,6 +217,7 @@ def test_post_exploitation_requires_scope_and_skill_load(tmp_path):
         .replace("| PT-042 | [ ] |", "| PT-042 | [~] |"),
         encoding="utf-8",
     )
+    bind_active_task(eng, "ts")
 
     res = command.check_command(
         command.CheckCommandArgs(
@@ -223,7 +226,6 @@ def test_post_exploitation_requires_scope_and_skill_load(tmp_path):
             eng_dir=str(eng),
             scope=str(eng / "scope" / "scope.yaml"),
             session_id="ts",
-            skill_loaded_file=str(skill_file),
         )
     )
     assert not res.errors, f"in-scope post-exploitation must pass core gate: {res.errors}"
@@ -235,13 +237,9 @@ def test_post_exploitation_requires_scope_and_skill_load(tmp_path):
             eng_dir=str(eng),
             scope=str(eng / "scope" / "scope.yaml"),
             session_id="ts",
-            skill_loaded_file=str(skill_file),
         )
     )
     assert res_oob.errors, "post-exploitation out-of-scope must be rejected"
-
-    gate = check_skill_load(eng / "no-skill-loaded", "ts", mandatory=True)
-    assert gate.errors, "skill-load gate must BLOCK post-exploitation without marker"
 
 
 # --------------------------------------------------------------------------- #

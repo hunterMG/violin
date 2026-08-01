@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from plugins.violin_guard import bootstrap, history, service, state
+from plugins.violin_guard import bootstrap, history, state
+from plugins.violin_guard import handlers as service
 
 
 def _engagement(tmp_path: Path) -> Path:
@@ -33,7 +34,14 @@ def test_record_ptt_refuses_to_reconcile_a_pending_batch(tmp_path: Path) -> None
     )
     result = json.loads(
         service.handle_record_ptt(
-            {"eng_dir": str(eng), "id": "PT-011", "status": "[~]", "note": "review"}
+            {
+                "eng_dir": str(eng),
+                "id": "PT-011",
+                "status": "[~]",
+                "note": "review",
+                "skill": "pentest",
+                "technique": "recon",
+            }
         )
     )
     assert result["status"] == "error"
@@ -47,6 +55,18 @@ def test_appending_work_invalidates_an_earlier_review(tmp_path: Path) -> None:
     state.mark_ptt_reviewed(eng, "PT-010", "review")
     state.mark_pending_sync(eng, "nmap -p 443 10.10.10.10", "RECON", "PT-010")
     assert state.get_pending_sync(eng)["ptt_reviewed"] is False
+
+
+def test_new_pending_batches_use_unique_uuid_ids(tmp_path: Path) -> None:
+    eng = _engagement(tmp_path)
+    state.mark_pending_sync(eng, "nmap -p 80 10.10.10.10", "RECON", "PT-010")
+    first = state.get_pending_sync(eng)["batch_id"]
+    state.clear_pending_sync(eng)
+    state.mark_pending_sync(eng, "nmap -p 443 10.10.10.10", "RECON", "PT-010")
+    second = state.get_pending_sync(eng)["batch_id"]
+    assert first != second
+    assert len(first) == 36
+    assert len(second) == 36
 
 
 def _completed_batch_with_active_replacement(eng: Path, replacement: str = "PT-011") -> str:

@@ -16,10 +16,11 @@ from . import bootstrap, hypotheses, ptt, state
 from . import history as history_mod
 from .phases import Phase, normalize_phase, requires_hypothesis, suppresses_heartbeat
 from .results import GuardResult
+from .skill_receipts import get_binding
 from .targets import (
     check_scope_targets,
-    extract_target_candidates,
     normalise_target,
+    resolve_command_targets,
 )
 
 __all__ = [
@@ -28,11 +29,10 @@ __all__ = [
     "CheckResult",
     "ScopeResult",
     "HypothesisResult",
-    "SkillLoadResult",
     "check_command",
     "validate_scope",
     "check_scope_authorization",
-    "check_skill_load",
+    "check_skill_binding",
     "check_hypothesis_freshness",
 ]
 
@@ -50,7 +50,6 @@ class CheckCommandArgs:
     scope: str = ""
     target: str | None = None
     session_id: str | None = None
-    skill_loaded_file: str | None = None
 
 
 @dataclass
@@ -71,12 +70,7 @@ class ScopeResult(CheckResult):
 
 @dataclass
 class HypothesisResult(CheckResult):
-    hypothesis_count: int = 0
-
-
-@dataclass
-class SkillLoadResult(CheckResult):
-    marker_path: str | None = None
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -116,12 +110,29 @@ def validate_scope(scope_path: Path) -> ScopeResult:
     if not isinstance(authorisation, dict) or authorisation.get("confirmed") is not True:
         result.add_error("scope.authorisation.confirmed must be true before target execution")
 
-    # targets.ip_addresses
+    # A scope may identify targets by IP, CIDR, domain, hostname, URL, or role.
+    # Requiring an IP address made otherwise valid web/domain engagements fail
+    # before the workflow could reach authorization and execution.
     targets = data.get("targets", {})
-    if "ip_addresses" not in targets:
-        result.add_error("scope.targets.ip_addresses is required")
-    elif not isinstance(targets["ip_addresses"], list) or not targets["ip_addresses"]:
-        result.add_error("scope.targets.ip_addresses must be a non-empty list")
+    if not isinstance(targets, dict):
+        result.add_error("scope.targets must be a mapping")
+    else:
+        target_fields = ("ip_addresses", "cidrs", "domains", "hostnames", "urls", "in_scope_urls")
+        has_list_target = any(
+            isinstance(targets.get(field), list)
+            and any(str(item).strip() for item in targets.get(field, []))
+            for field in target_fields
+        )
+        roles = targets.get("roles")
+        has_role_target = isinstance(roles, dict) and any(
+            (isinstance(value, list) and any(str(item).strip() for item in value))
+            or (isinstance(value, str) and value.strip())
+            for value in roles.values()
+        )
+        if not has_list_target and not has_role_target:
+            result.add_error(
+                "scope.targets must contain at least one IP, CIDR, domain, hostname, URL, or role"
+            )
 
     assessment_hosts = data.get("assessment_hosts", {}) or {}
     if not isinstance(assessment_hosts, dict):
@@ -150,17 +161,52 @@ def validate_scope(scope_path: Path) -> ScopeResult:
     return result
 
 
-_PHASE_ACTION_TERMS = {
-    Phase.SCOPING: ("scope",),
-    Phase.RECON: ("recon", "discovery", "banner", "version", "scan", "enumerat"),
-    Phase.VULN_RESEARCH: ("vuln", "research", "cve", "exploitdb"),
-    Phase.EXPLOITATION: ("exploit", "validation", "poc"),
-    Phase.POST_EXPLOITATION: ("post-exploit", "post exploitation", "exploit", "validation"),
-    Phase.PRIVESC: ("privilege", "privesc", "exploit", "validation"),
-    Phase.FLAGS: ("flag", "capture"),
-    Phase.REPORTING: ("report",),
-    Phase.RETROSPECTIVE: ("retrospective",),
+_PHASE_ACTIONS = {
+    Phase.SCOPING: frozenset({"scope", "scoping"}),
+    Phase.RECON: frozenset(
+        {
+            "recon",
+            "discovery",
+            "host port discovery",
+            "host-port-discovery",
+            "banner grabbing",
+            "banner-grabbing",
+            "version detection",
+            "version-detection",
+            "scanning",
+            "enumeration",
+        }
+    ),
+    Phase.VULN_RESEARCH: frozenset(
+        {
+            "vulnerability research",
+            "vulnerability-research",
+            "vuln-research",
+            "research",
+            "cve-research",
+            "exploitdb",
+        }
+    ),
+    Phase.EXPLOITATION: frozenset(
+        {
+            "exploitation",
+            "exploit validation",
+            "exploit-validation",
+            "poc",
+            "poc validation",
+            "poc-validation",
+        }
+    ),
+    Phase.POST_EXPLOITATION: frozenset({"post-exploitation", "post exploitation"}),
+    Phase.PRIVESC: frozenset({"privilege escalation", "privilege-escalation", "privesc"}),
+    Phase.FLAGS: frozenset({"flags", "flag capture", "flag-capture"}),
+    Phase.REPORTING: frozenset({"report", "reporting"}),
+    Phase.RETROSPECTIVE: frozenset({"retrospective"}),
 }
+
+
+def _normalise_action(value: object) -> str:
+    return " ".join(str(value).strip().lower().replace("_", " ").replace("/", " ").split())
 
 
 def check_scope_authorization(scope: dict[str, Any] | None, phase: Phase) -> CheckResult:
@@ -169,17 +215,17 @@ def check_scope_authorization(scope: dict[str, Any] | None, phase: Phase) -> Che
     if not isinstance(scope, dict):
         return result
     roe = scope.get("rules_of_engagement") or {}
-    allowed = [str(item).lower() for item in roe.get("allowed_actions", []) or []]
-    forbidden = [str(item).lower() for item in roe.get("forbidden_actions", []) or []]
-    terms = _PHASE_ACTION_TERMS[phase]
-    if any(any(term in action for term in terms) for action in forbidden):
+    allowed = {_normalise_action(item) for item in roe.get("allowed_actions", []) or []}
+    forbidden = {_normalise_action(item) for item in roe.get("forbidden_actions", []) or []}
+    actions = _PHASE_ACTIONS[phase]
+    if forbidden & actions:
         result.add_error(
             f"phase {phase.value} conflicts with scope.rules_of_engagement.forbidden_actions"
         )
-    if not any(any(term in action for term in terms) for action in allowed):
+    if not allowed & actions:
         result.add_error(
             f"phase {phase.value} is not permitted by scope.rules_of_engagement.allowed_actions; "
-            f"add an allowed_actions entry containing one of: {', '.join(terms)}"
+            f"add an allowed_actions entry containing one of: {', '.join(sorted(actions))}"
         )
     return result
 
@@ -230,32 +276,20 @@ def check_local_artifact_paths(command: str) -> CheckResult:
     return result
 
 
-def check_skill_load(eng_dir: Path, session_id: str, mandatory: bool = True) -> SkillLoadResult:
-    """Verify skill-load marker exists for the session."""
-    result = SkillLoadResult()
-    marker = eng_dir / "state" / f".skill-loaded-{session_id}"
-    result.marker_path = str(marker)
-
-    if not marker.exists():
-        stale_markers = sorted((eng_dir / "state").glob(".skill-loaded-*"))
-        stale_hint = ""
-        if stale_markers:
-            names = ", ".join(candidate.name for candidate in stale_markers[:3])
-            stale_hint = (
-                f"; found marker(s) for another session: {names}. "
-                f"After loading the skill, create the canonical marker: {marker}"
-            )
-        if mandatory:
-            result.add_error(f"skill-load gate not satisfied: marker missing{stale_hint}")
-        else:
-            result.add_warning(f"skill-load marker missing (non-mandatory mode){stale_hint}")
+def check_skill_binding(eng_dir: Path, task_id: str, session_id: str, phase: Phase) -> CheckResult:
+    """Require a delivered, current-context receipt binding for target work."""
+    result = CheckResult()
+    binding = get_binding(eng_dir, task_id)
+    if not binding:
+        result.add_error(f"skill receipt binding missing for active task {task_id}")
         return result
-
-    content = marker.read_text(encoding="utf-8").strip()
-    if "skill-loaded:" not in content:
-        result.add_warning("skill-load marker exists but format is unexpected")
-
-    result.add_info(f"skill-load marker verified: {marker}")
+    if binding.get("session_id") != session_id:
+        result.add_error("skill receipt binding belongs to a different session")
+    current = state.read_json(eng_dir / "state" / "skills.json").get("context", {})
+    if binding.get("context_generation") != current.get("generation"):
+        result.add_error("skill receipt binding is stale after context reset")
+    if not result.errors:
+        result.add_info(f"skill receipt binding verified: {binding.get('skill')}")
     return result
 
 
@@ -265,7 +299,11 @@ def check_skill_load(eng_dir: Path, session_id: str, mandatory: bool = True) -> 
 
 
 def check_hypothesis_freshness(
-    eng_dir: Path, phase: Phase, command: str, primary_target: str | None = None
+    eng_dir: Path,
+    phase: Phase,
+    command: str,
+    primary_target: str | None = None,
+    hypothesis_id: str | None = None,
 ) -> HypothesisResult:
     """Ensure hypotheses exist and are fresh for phases that require them."""
     result = HypothesisResult()
@@ -275,7 +313,6 @@ def check_hypothesis_freshness(
 
     hyp_path = eng_dir / "hypotheses.md"
     hyps = hypotheses.parse_hypotheses(hyp_path)
-    result.hypothesis_count = len(hyps)
 
     if not hyps:
         result.add_error(f"phase {phase.value} requires at least one hypothesis in hypotheses.md")
@@ -288,9 +325,16 @@ def check_hypothesis_freshness(
         Phase.PRIVESC: {Phase.EXPLOITATION, Phase.POST_EXPLOITATION, Phase.PRIVESC},
         Phase.FLAGS: {Phase.PRIVESC, Phase.FLAGS},
     }.get(phase, {phase})
-    targets = {normalise_target(target) for target in extract_target_candidates(command)}
-    if primary_target:
-        targets.add(normalise_target(primary_target))
+    scope_path = eng_dir / "scope" / "scope.yaml"
+    scope_data = validate_scope(scope_path).scope_data if scope_path.exists() else None
+    targets = resolve_command_targets(command, primary_target=primary_target, scope_data=scope_data)
+
+    norm_hyp_id = (
+        hypothesis_id.strip().upper().removeprefix("H-").lstrip("0") or "0"
+        if hypothesis_id
+        else None
+    )
+
     relevant = []
     for hypothesis in hyps:
         if hypothesis.canonical_status() == "Rejected" or not hypothesis.target:
@@ -300,6 +344,12 @@ def check_hypothesis_freshness(
         except ValueError:
             continue
         target = normalise_target(hypothesis.target)
+
+        if norm_hyp_id is not None:
+            h_id = hypothesis.id.strip().upper().removeprefix("H-").lstrip("0") or "0"
+            if h_id != norm_hyp_id:
+                continue
+
         if hypothesis_phase in acceptable_phases and (not targets or target in targets):
             relevant.append(hypothesis)
     if not relevant:
@@ -308,11 +358,11 @@ def check_hypothesis_freshness(
             for h in hyps
             if h.canonical_status() != "Rejected" and h.target
         ]
-        result.add_error(
-            f"phase {phase.value} requires a non-rejected hypothesis matching the command target; "
-            f"parsed targets: {', '.join(sorted(targets)) or 'none'}; "
-            f"available hypotheses: {', '.join(eligible) or 'none'}"
-        )
+        msg = f"phase {phase.value} requires a non-rejected hypothesis matching the command target"
+        if norm_hyp_id:
+            msg += f" (linked H-{norm_hyp_id.zfill(3)})"
+        msg += f"; parsed targets: {', '.join(sorted(targets)) or 'none'}; available hypotheses: {', '.join(eligible) or 'none'}"
+        result.add_error(msg)
         return result
 
     if phase in {
@@ -374,10 +424,20 @@ def check_hypothesis_freshness(
 def check_command(args: CheckCommandArgs) -> CheckResult:
     """Run all sub-guards for a target command."""
     eng_dir = state.resolve_eng_dir(args.eng_dir)
-    scope_path = Path(args.scope) if args.scope else eng_dir / "scope" / "scope.yaml"
+    canonical_scope_path = (eng_dir / "scope" / "scope.yaml").resolve()
+    requested_scope_path = (
+        Path(args.scope).expanduser().resolve() if args.scope else canonical_scope_path
+    )
+    scope_path = canonical_scope_path
     phase = normalize_phase(args.phase)
 
     result = CheckResult()
+
+    if requested_scope_path != canonical_scope_path:
+        result.add_error(
+            "runtime execution must use the engagement's canonical scope.yaml; "
+            "validate alternate scope files separately with validate-scope"
+        )
 
     # 1. Bootstrap completeness
     bootstrap_result = bootstrap.check_bootstrap(str(eng_dir), auto_repair=False)
@@ -405,21 +465,17 @@ def check_command(args: CheckCommandArgs) -> CheckResult:
     artifact_result = check_local_artifact_paths(args.command)
     result.infos.extend(artifact_result.infos)
 
-    # 3. Skill-load gate (mandatory)
+    # 3. Session identity gate
     session_id = state.resolve_session_id(eng_dir, args.session_id)
     if not session_id:
-        result.add_error("session_id is required for the skill-load gate")
-    if session_id:
-        skill_result = check_skill_load(eng_dir, session_id, mandatory=True)
-        result.errors.extend(skill_result.errors)
-        result.warnings.extend(skill_result.warnings)
-        result.infos.extend(skill_result.infos)
+        result.add_error("session_id is required for the skill receipt gate")
 
     # 4. PTT active task
     ptt_path = eng_dir / "state" / "ptt.md"
     ptt_validation = ptt.validate_ptt(ptt.parse_ptt(ptt_path))
     result.errors.extend(ptt_validation.errors)
     result.warnings.extend(ptt_validation.warnings)
+    active_task_hyp_id = None
     if ptt_validation.active_task:
         result.infos.append(f"active PTT task: {ptt_validation.active_task}")
         active_task = ptt.find_active_task(ptt_validation.tasks)
@@ -430,6 +486,22 @@ def check_command(args: CheckCommandArgs) -> CheckResult:
                 "pause the current task and start one under the requested Phase heading with "
                 "violin_record_ptt"
             )
+        if active_task and active_task.note:
+            hyp_match = re.search(r"\bH-\d+\b", active_task.note, re.IGNORECASE)
+            if hyp_match:
+                active_task_hyp_id = hyp_match.group(0).upper()
+        if active_task and session_id:
+            binding_result = check_skill_binding(eng_dir, active_task.id, session_id, phase)
+            result.errors.extend(binding_result.errors)
+            result.warnings.extend(binding_result.warnings)
+            result.infos.extend(binding_result.infos)
+
+    semantic_lock = state.semantic_lock(eng_dir)
+    if semantic_lock:
+        result.add_error(
+            "semantic anti-stuck lock: five evidence-poor reviews require a recorded research "
+            "attempt plus a meaningful next_technique pivot before target execution"
+        )
 
     # 5. History staleness (duplicate detection)
     pending = state.get_pending_sync(str(eng_dir)) or {}
@@ -442,7 +514,9 @@ def check_command(args: CheckCommandArgs) -> CheckResult:
     result.infos.extend(h_infos)
 
     # 6. Hypothesis freshness
-    hyp_result = check_hypothesis_freshness(eng_dir, phase, args.command, args.target)
+    hyp_result = check_hypothesis_freshness(
+        eng_dir, phase, args.command, args.target, hypothesis_id=active_task_hyp_id
+    )
     result.errors.extend(hyp_result.errors)
     result.warnings.extend(hyp_result.warnings)
     result.infos.extend(hyp_result.infos)

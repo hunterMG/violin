@@ -4,11 +4,30 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
 
-from plugins.violin_guard import bootstrap, history, ptt, service, state
+from plugins.violin_guard import (
+    bootstrap,
+    findings,
+    history,
+    hypotheses,
+    ptt,
+    state,
+)
+from plugins.violin_guard import (
+    handlers as service,
+)
+from plugins.violin_guard.skill_receipts import (
+    SkillViewResult,
+    complete_delivery,
+    get_binding,
+    prepare_delivery,
+    prepare_review_readiness,
+)
+from tests.guard.receipt_fixture import bind_active_task
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -30,6 +49,7 @@ def _engagement(tmp_path: Path) -> Path:
     (eng / "state" / ".skill-loaded-test-session").write_text(
         "skill-loaded: pentest\n", encoding="utf-8"
     )
+    bind_active_task(eng, "test-session")
     return eng
 
 
@@ -54,6 +74,34 @@ def _pending_batch(eng: Path) -> None:
     )
     history.append_history(eng, command, "RECON", 0, manifest.relative_to(eng).as_posix())
     state.mark_pending_sync(eng, command, "RECON", "PT-010")
+
+
+def _prepare_finding_review(eng: Path, finding_id: str = "FIND-001") -> None:
+    hypotheses.update_hypothesis(
+        eng / "hypotheses.md",
+        id="001",
+        title="HTTP listener is externally reachable",
+        status="Validated",
+        phase="RECON",
+        target="10.10.10.10",
+        runtime_evidence="evidence/executions/batch-command.stdout.txt",
+    )
+    reserved = prepare_delivery(
+        eng,
+        session_id="test-session",
+        skill="fp-check",
+        bundle_digest="sha256:" + "b" * 64,
+        phase="RETROSPECTIVE",
+    )
+    if reserved.owner:
+        reserved = complete_delivery(eng, reserved, SkillViewResult(True, content="fp-check"))
+    evidence = findings._batch_evidence(eng, state.get_pending_sync(eng))
+    prepare_review_readiness(
+        eng,
+        finding_id=finding_id,
+        evidence_digest="sha256:" + sha256("\n".join(sorted(evidence)).encode()).hexdigest(),
+        delivery_id=reserved.id,
+    )
 
 
 def test_create_task_inserts_into_requested_phase_table(tmp_path: Path) -> None:
@@ -89,13 +137,15 @@ def test_status_explains_current_phase_pending_commands_and_skill(tmp_path: Path
     assert result["current_phase"] == "RECON"
     assert result["pending_batch"]["commands"][0]["required_phase"] == "RECON"
     assert result["phase_requirements"]["EXPLOITATION"]["sync_window"] == 20
-    assert result["skill"]["loaded"] is True
+    assert result["skill"]["binding_ready"] is True
+    assert result["skill"]["legacy_marker_status"] in {"absent", "obsolete"}
 
 
 @pytest.mark.parametrize("task_status", ["[~]", "[x]", "[!]", "[-]"])
 def test_review_batch_updates_ptt_and_clears_lock(tmp_path: Path, task_status: str) -> None:
     eng = _engagement(tmp_path)
     _pending_batch(eng)
+    _prepare_finding_review(eng)
 
     result = json.loads(
         service.handle_review_batch(
@@ -115,9 +165,44 @@ def test_review_batch_updates_ptt_and_clears_lock(tmp_path: Path, task_status: s
     assert "reviewed-batch:" in (eng / "state" / "ptt.md").read_text(encoding="utf-8")
 
 
+def test_review_batch_does_not_replace_execution_skill_binding(tmp_path: Path, monkeypatch) -> None:
+    eng = _engagement(tmp_path)
+    _pending_batch(eng)
+    original_binding = get_binding(eng, "PT-010")
+    monkeypatch.setattr(
+        service,
+        "HermesSkillViewAdapter",
+        lambda: type(
+            "Ready",
+            (),
+            {"view": lambda *_args, **_kwargs: SkillViewResult(True, "pentest review")},
+        )(),
+    )
+    args = {
+        "eng_dir": str(eng),
+        "id": "PT-010",
+        "status": "[~]",
+        "note": "Reviewed service discovery evidence",
+        "skill": "pentest",
+        "outcome": "progress",
+        "evidence_paths": ["evidence/executions/batch-command.stdout.txt"],
+        "next_action": "enumerate HTTP",
+        "next_technique": "http-enumeration",
+    }
+
+    prepared = json.loads(service.handle_review_batch(args))
+    assert prepared["status"] == "skill_prepared"
+    reviewed = json.loads(service.handle_review_batch(args))
+
+    assert reviewed["status"] == "ok"
+    assert reviewed["binding_task_id"] is None
+    assert get_binding(eng, "PT-010") == original_binding
+
+
 def test_review_batch_creates_finding_from_current_batch_receipts(tmp_path: Path) -> None:
     eng = _engagement(tmp_path)
     _pending_batch(eng)
+    _prepare_finding_review(eng)
 
     result = json.loads(
         service.handle_review_batch(
@@ -127,6 +212,8 @@ def test_review_batch_creates_finding_from_current_batch_receipts(tmp_path: Path
                 "status": "[~]",
                 "note": "Reviewed the HTTP service receipt",
                 "finding": {
+                    "finding_id": "FIND-001",
+                    "hypothesis_id": "H-001",
                     "title": "Exposed HTTP service",
                     "severity": "Info",
                     "description": "An HTTP listener is reachable on the approved target.",
@@ -199,12 +286,15 @@ def test_review_batch_retry_reuses_marker_and_finding_after_partial_failure(
 ) -> None:
     eng = _engagement(tmp_path)
     _pending_batch(eng)
+    _prepare_finding_review(eng)
     args = {
         "eng_dir": str(eng),
         "id": "PT-010",
         "status": "[~]",
         "note": "Reviewed HTTP receipt",
         "finding": {
+            "finding_id": "FIND-001",
+            "hypothesis_id": "H-001",
             "title": "Exposed HTTP service",
             "severity": "Info",
             "description": "An HTTP listener is reachable.",

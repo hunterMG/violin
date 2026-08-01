@@ -46,6 +46,11 @@ _FIELD_NAMES = {
     "test response": "test_response",
     "verification status": "verification_status",
     "rejection reason": "rejection_reason",
+    "candidate source": "candidate_source",
+    "entry point": "entry_point",
+    "data flow": "data_flow",
+    "source evidence": "source_evidence",
+    "runtime evidence": "runtime_evidence",
     "updated": "updated",
 }
 
@@ -68,6 +73,11 @@ class Hypothesis:
     test_response: str = ""
     verification_status: str = ""
     rejection_reason: str = ""
+    candidate_source: str = ""
+    entry_point: str = ""
+    data_flow: str = ""
+    source_evidence: str = ""
+    runtime_evidence: str = ""
     updated: str = ""
 
     def canonical_status(self) -> str:
@@ -91,6 +101,11 @@ class Hypothesis:
             "test_response": self.test_response,
             "verification_status": self.verification_status,
             "rejection_reason": self.rejection_reason,
+            "candidate_source": self.candidate_source,
+            "entry_point": self.entry_point,
+            "data_flow": self.data_flow,
+            "source_evidence": self.source_evidence,
+            "runtime_evidence": self.runtime_evidence,
             "updated": self.updated,
         }
 
@@ -98,6 +113,7 @@ class Hypothesis:
         now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
         lines = [f"### H-{self.id}: {self.title}"]
         lines.append(f"- **Status:** {self.canonical_status()}")
+        lines.append(f"- **Updated:** {self.updated or now}")
         if self.phase:
             lines.append(f"- **Phase:** {self.phase}")
         if self.service:
@@ -124,6 +140,15 @@ class Hypothesis:
             lines.append(f"- **Verification Status:** {self.verification_status}")
         if self.rejection_reason:
             lines.append(f"- **Rejection Reason:** {self.rejection_reason}")
+        for label, value in (
+            ("Candidate Source", self.candidate_source),
+            ("Entry Point", self.entry_point),
+            ("Data Flow", self.data_flow),
+            ("Source Evidence", self.source_evidence),
+            ("Runtime Evidence", self.runtime_evidence),
+        ):
+            if value:
+                lines.append(f"- **{label}:** {value}")
         lines.append(f"- **Updated:** {self.updated or now} UTC")
         return "\n".join(lines) + "\n"
 
@@ -258,6 +283,11 @@ def validate_hypothesis_record(
             f"target '{target}' is not in scope; record a hypothesis only for in-scope hosts"
         )
     errors.extend(_validate_rejection_fields(fields))
+    if (
+        _normalize_status(str(fields.get("status") or "Candidate")) == "Validated"
+        and not str(fields.get("runtime_evidence") or "").strip()
+    ):
+        errors.append("Validated requires runtime_evidence; source evidence alone is not proof")
     return errors
 
 
@@ -281,25 +311,36 @@ def update_hypothesis(
     else:
         numeric_ids = [int(h.id) for h in hypotheses_list if h.id.isdigit()]
         normalized_fields["id"] = str(max(numeric_ids, default=0) + 1).zfill(3)
+
+    h_id = normalized_fields["id"]
+    existing = next((h for h in hypotheses_list if h.id == h_id), None)
+    existing_dict = existing.to_dict() if existing else {}
+    merged_fields = {**existing_dict, **normalized_fields}
+
     # Build the candidate record so we can validate before mutating the board.
     temp = Hypothesis(
-        id=normalized_fields["id"],
-        title=normalized_fields.get("title", "") or f"Hypothesis {normalized_fields['id']}",
-        status=(normalized_fields.get("status") or "Candidate"),
-        phase=(normalized_fields.get("phase") or "").strip(),
-        service=(normalized_fields.get("service") or "").strip(),
-        port=(normalized_fields.get("port") or "").strip(),
-        target=(normalized_fields.get("target") or "").strip(),
-        vuln_class=(normalized_fields.get("vuln_class") or "").strip(),
-        rationale=(normalized_fields.get("rationale") or "").strip(),
-        evidence=(normalized_fields.get("evidence") or "").strip(),
-        cve_research=(normalized_fields.get("cve_research") or "").strip(),
-        exploit_research=(normalized_fields.get("exploit_research") or "").strip(),
-        test_command=(normalized_fields.get("test_command") or "").strip(),
-        test_response=(normalized_fields.get("test_response") or "").strip(),
-        verification_status=(normalized_fields.get("verification_status") or "").strip(),
-        rejection_reason=(normalized_fields.get("rejection_reason") or "").strip(),
-        updated=(normalized_fields.get("updated") or "").strip(),
+        id=merged_fields["id"],
+        title=merged_fields.get("title", "") or f"Hypothesis {merged_fields['id']}",
+        status=(merged_fields.get("status") or "Candidate"),
+        phase=(merged_fields.get("phase") or "").strip(),
+        service=(merged_fields.get("service") or "").strip(),
+        port=(merged_fields.get("port") or "").strip(),
+        target=(merged_fields.get("target") or "").strip(),
+        vuln_class=(merged_fields.get("vuln_class") or "").strip(),
+        rationale=(merged_fields.get("rationale") or "").strip(),
+        evidence=(merged_fields.get("evidence") or "").strip(),
+        cve_research=(merged_fields.get("cve_research") or "").strip(),
+        exploit_research=(merged_fields.get("exploit_research") or "").strip(),
+        test_command=(merged_fields.get("test_command") or "").strip(),
+        test_response=(merged_fields.get("test_response") or "").strip(),
+        verification_status=(merged_fields.get("verification_status") or "").strip(),
+        rejection_reason=(merged_fields.get("rejection_reason") or "").strip(),
+        candidate_source=(merged_fields.get("candidate_source") or "").strip(),
+        entry_point=(merged_fields.get("entry_point") or "").strip(),
+        data_flow=(merged_fields.get("data_flow") or "").strip(),
+        source_evidence=(merged_fields.get("source_evidence") or "").strip(),
+        runtime_evidence=(merged_fields.get("runtime_evidence") or "").strip(),
+        updated=(merged_fields.get("updated") or "").strip(),
     )
     errors = validate_hypothesis_record(temp.to_dict(), in_scope_hosts=in_scope_hosts)
     if errors:

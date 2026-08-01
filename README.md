@@ -218,7 +218,10 @@ violin/
 ├── config.yaml             # Profile config (toolsets, safety, memory)
 ├── distribution.yaml       # Hermes distribution manifest
 ├── plugins/violin_guard/   # Required Hermes guard plugin and execution boundary
-│   ├── terminal_policy.py  # Best-effort blocks for clearly target-touching raw terminal calls
+│   ├── bash_ast.py         # bashlex AST command tokenization and parsing
+│   ├── terminal_policy.py  # AST-based best-effort blocks for target-touching raw terminal calls
+│   ├── targets.py          # Scope enforcement using netaddr and yarl URL parsing
+│   ├── schemas.py          # Pydantic v2 tool schemas and validation
 │   └── code_execution_audit.py # Engagement audit contract for execute_code
 ├── scripts/                # CLI and release smoke helpers
 │   ├── violin_guard.py     # Diagnostic/admin CLI over the plugin modules
@@ -245,7 +248,7 @@ python scripts/violin_guard.py check-release
 
 Validates the plugin manifest and registered tools, isolated Hermes-style plugin import, stale skill references, Ruff, and the full pytest suite.
 
-Hermes skills are loaded on demand. Start the profile with `hermes chat --skills pentest` when the launcher supports arguments; otherwise load `pentest` immediately, then confirm the engagement marker with `python scripts/violin_guard.py status --eng-dir "$ENG_DIR" --section skill`. Hermes does not currently expose a distribution-level setting that can truthfully force-load a profile skill.
+Hermes skills are loaded on demand and enforced by Violin receipts. Start with `pentest`, then use `violin_record_ptt` to select the route-required skill. The first call prepares its real `skill_view` content without mutating the PTT; repeat the same transition after that tool result returns to the model to bind it. `violin_status` reports the route, binding, context generation, recovery action, and any obsolete legacy marker. Target and browser activity are blocked only in the same model call as delivery or binding, then open automatically on the next tool-loop continuation.
 
 ---
 

@@ -1,4 +1,3 @@
-import importlib.util
 import json
 import subprocess
 import sys
@@ -6,6 +5,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+
+from tests.guard.receipt_fixture import bind_active_task
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -33,27 +34,18 @@ engagement:
 """
 
 
-def _load_sub(name, path):
-    spec = importlib.util.spec_from_file_location("vgpkg." + name, path)
-    mod = importlib.util.module_from_spec(spec)
-    mod.__package__ = "vgpkg"
-    sys.modules["vgpkg." + name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-# Load the plugin as a real package so `from . import utils` resolves.
-_PLUGIN = ROOT / "plugins/violin_guard"
-_PKG = importlib.util.spec_from_file_location("vgpkg", _PLUGIN / "__init__.py")
-pkg = importlib.util.module_from_spec(_PKG)
-pkg.__path__ = [str(_PLUGIN)]
-pkg.__package__ = "vgpkg"
-sys.modules["vgpkg"] = pkg
-
-TOOLS = _load_sub("tools", _PLUGIN / "service.py")
-
-# Import core modules from the new location
-from plugins.violin_guard import bootstrap, command, execution, history, hypotheses, ptt, state
+from plugins.violin_guard import (
+    bootstrap,
+    command,
+    execution,
+    history,
+    hypotheses,
+    ptt,
+    state,
+)
+from plugins.violin_guard import (
+    handlers as TOOLS,
+)
 from plugins.violin_guard.targets import extract_target_candidates
 
 
@@ -114,10 +106,7 @@ def _fake_target_executor(monkeypatch):
             "sync_credit_remaining": remaining,
         }
 
-    # Patch the exact module used by the separately loaded vgpkg.tools facade.
-    monkeypatch.setattr(TOOLS.execution, "execute", fake_execute)
     monkeypatch.setattr(execution, "execute", fake_execute)
-    assert TOOLS.execution.execute is fake_execute
 
 
 def _init_e2e(tmp_path, skill_file):
@@ -149,6 +138,7 @@ def _init_e2e(tmp_path, skill_file):
         ptt_path.read_text(encoding="utf-8").replace("| PT-010 | [ ] |", "| PT-010 | [~] |"),
         encoding="utf-8",
     )
+    bind_active_task(eng, "ts")
     return eng
 
 
@@ -178,7 +168,6 @@ def test_recon_does_not_require_hypothesis(tmp_path):
             phase="recon",
             eng_dir=str(eng),
             scope=str(eng / "scope" / "scope.yaml"),
-            skill_loaded_file=str(skill_file),
             session_id="ts",
         )
     )
@@ -193,7 +182,6 @@ def test_recon_does_not_require_hypothesis(tmp_path):
             phase="vuln-research",
             eng_dir=str(eng),
             scope=str(eng / "scope" / "scope.yaml"),
-            skill_loaded_file=str(skill_file),
             session_id="ts",
         )
     )
@@ -216,13 +204,13 @@ def test_recon_does_not_require_hypothesis(tmp_path):
         .replace("| PT-030 | [ ] |", "| PT-030 | [~] |"),
         encoding="utf-8",
     )
+    bind_active_task(eng, "ts")
     research2 = command.check_command(
         command.CheckCommandArgs(
             command="nmap -sV 10.10.10.10",
             phase="vuln-research",
             eng_dir=str(eng),
             scope=str(eng / "scope" / "scope.yaml"),
-            skill_loaded_file=str(skill_file),
             session_id="ts",
         )
     )
@@ -245,7 +233,6 @@ def test_recon_does_not_require_hypothesis(tmp_path):
             phase="vuln-research",
             eng_dir=str(eng),
             scope=str(eng / "scope" / "scope.yaml"),
-            skill_loaded_file=str(skill_file),
             session_id="ts",
         )
     )
@@ -397,7 +384,92 @@ def test_exploitation_requires_cve_and_exploit_research_attempts(tmp_path):
     assert not allowed.errors, allowed.errors
 
 
-def test_record_ptt_can_start_pristine_task(tmp_path):
+def test_hypothesis_enforces_scope_target_fallback(tmp_path):
+    """Verify hypothesis guard checks scope target when command contains no target string."""
+    (tmp_path / "scope").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "scope" / "scope.yaml").write_text(
+        "targets:\n  ip_addresses:\n    - 10.129.47.140\n"
+        "rules_of_engagement:\n  allowed_actions: [RECON, EXPLOITATION]\n"
+        "engagement:\n  name: Test\n"
+        "authorized_parties: [Tester]\n"
+        "authorisation:\n  confirmed: true\n",
+        encoding="utf-8",
+    )
+    # Hypothesis is for a DIFFERENT target host (192.168.1.1)
+    (tmp_path / "hypotheses.md").write_text(
+        "### H-001: Other host\n"
+        "- **Target:** 192.168.1.1\n"
+        "- **Status:** Validated\n"
+        "- **Phase:** EXPLOITATION\n"
+        "- **CVE Research:** Done\n"
+        "- **Exploit Research:** Done\n",
+        encoding="utf-8",
+    )
+
+    # Command has no IP string, but scope target 10.129.47.140 should NOT match 192.168.1.1 hypothesis
+    result = command.check_hypothesis_freshness(
+        tmp_path, command.Phase.EXPLOITATION, "python3 exploit.py"
+    )
+    assert result.errors, "Expected error when hypothesis target doesn't match scope target"
+    assert any(
+        "requires a non-rejected hypothesis matching the command target" in err
+        for err in result.errors
+    )
+
+
+def test_check_command_enforces_active_task_hypothesis_id(tmp_path):
+    """Verify check_command validates the specific hypothesis ID linked in active PTT task note."""
+    (tmp_path / "scope").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "scope" / "scope.yaml").write_text(
+        "targets:\n  ip_addresses:\n    - 10.129.47.140\n"
+        "rules_of_engagement:\n  allowed_actions: [RECON, EXPLOITATION]\n"
+        "engagement:\n  name: Test\n"
+        "authorized_parties: [Tester]\n"
+        "authorisation:\n  confirmed: true\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state" / "ptt.md").write_text(
+        "## Phase: EXPLOITATION\n\n| PT-001 | [~] | Exploit Task | testing H-002 |\n",
+        encoding="utf-8",
+    )
+    # H-001 has research, but active task links H-002 which has NO research
+    (tmp_path / "hypotheses.md").write_text(
+        "### H-001: First\n"
+        "- **Target:** 10.129.47.140\n"
+        "- **Status:** Validated\n"
+        "- **Phase:** EXPLOITATION\n"
+        "- **CVE Research:** Done\n"
+        "- **Exploit Research:** Done\n\n"
+        "### H-002: Linked Task Hypothesis\n"
+        "- **Target:** 10.129.47.140\n"
+        "- **Status:** Candidate\n"
+        "- **Phase:** EXPLOITATION\n"
+        "- **CVE Research:** \n"
+        "- **Exploit Research:** \n",
+        encoding="utf-8",
+    )
+
+    cmd_args = command.CheckCommandArgs(
+        command="python3 exploit.py 10.129.47.140",
+        phase="EXPLOITATION",
+        eng_dir=str(tmp_path),
+        scope=str(tmp_path / "scope" / "scope.yaml"),
+        session_id="test-session",
+    )
+    res = command.check_command(cmd_args)
+    assert res.errors
+    assert any("H-002 missing CVE Research and Exploit Research" in err for err in res.errors)
+
+
+def test_record_ptt_can_start_pristine_task(tmp_path, monkeypatch):
+    from plugins.violin_guard.skill_receipts import SkillViewResult
+
+    monkeypatch.setattr(
+        TOOLS,
+        "HermesSkillViewAdapter",
+        lambda: type("Ready", (), {"view": lambda *_a, **_k: SkillViewResult(True, "skill")})(),
+    )
     skill_file = tmp_path / ".skill-loaded-ts"
     eng = _init_e2e(tmp_path, skill_file)
     ptt_path = eng / "state" / "ptt.md"
@@ -408,7 +480,27 @@ def test_record_ptt_can_start_pristine_task(tmp_path):
 
     result = json.loads(
         TOOLS.handle_record_ptt(
-            {"eng_dir": str(eng), "id": "PT-010", "status": "[~]", "note": "Start recon"}
+            {
+                "eng_dir": str(eng),
+                "id": "PT-010",
+                "status": "[~]",
+                "note": "Start recon",
+                "skill": "pentest",
+                "technique": "recon",
+            }
+        )
+    )
+    assert result["status"] == "skill_prepared", result
+    result = json.loads(
+        TOOLS.handle_record_ptt(
+            {
+                "eng_dir": str(eng),
+                "id": "PT-010",
+                "status": "[~]",
+                "note": "Start recon",
+                "skill": "pentest",
+                "technique": "recon",
+            }
         )
     )
     assert result["status"] == "ok", result
@@ -431,7 +523,6 @@ def test_first_command_requires_an_active_ptt_task(tmp_path):
         phase="recon",
         eng_dir=str(eng),
         scope=str(eng / "scope" / "scope.yaml"),
-        skill_loaded_file=str(skill_file),
         session_id="ts",
     )
     first = command.check_command(args)
@@ -455,7 +546,6 @@ def test_multiple_active_ptt_tasks_block_target_execution(tmp_path):
             phase="recon",
             eng_dir=str(eng),
             scope=str(eng / "scope" / "scope.yaml"),
-            skill_loaded_file=str(skill_file),
             session_id="ts",
         )
     )
@@ -464,16 +554,8 @@ def test_multiple_active_ptt_tasks_block_target_execution(tmp_path):
     )
 
 
-def test_exec_blocked_without_skill_load(monkeypatch, tmp_path):
-    """Skill-load gate: check-command BLOCKs when the SKILL.md marker is absent,
-    and handle_exec honours that BLOCK (status 'denied')."""
-    from plugins.violin_guard.command import check_skill_load
-
-    # Real gate: missing marker file => BLOCK (error).
-    gate = check_skill_load(Path(tmp_path / "no-skill-loaded"), "test", mandatory=True)
-    assert gate.errors, "missing skill-loaded marker must BLOCK"
-
-    # handle_exec must translate a BLOCKed check-command into 'denied'.
+def test_exec_blocked_without_receipt_binding(monkeypatch, tmp_path):
+    """Target execution remains denied when its receipt binding is absent."""
     _patch(monkeypatch, _cp(1, "BLOCK: skill load gate not satisfied\n"))
     out = json.loads(
         TOOLS.handle_exec(
@@ -487,20 +569,6 @@ def test_exec_blocked_without_skill_load(monkeypatch, tmp_path):
     )
     assert out["status"] in ("denied", "error")
     assert out["status"] in ("denied", "error")
-
-
-def test_skill_load_gate_identifies_stale_session_marker(tmp_path):
-    from plugins.violin_guard.command import check_skill_load
-
-    state = tmp_path / "state"
-    state.mkdir()
-    (state / ".skill-loaded-old-session").write_text("skill-loaded: test\n", encoding="utf-8")
-
-    gate = check_skill_load(tmp_path, "current-session", mandatory=True)
-
-    assert gate.errors
-    assert ".skill-loaded-old-session" in gate.errors[0]
-    assert str(state / ".skill-loaded-current-session") in gate.errors[0]
 
 
 def test_init_engagement_creates_compliant_artifacts(tmp_path):
@@ -522,6 +590,13 @@ def test_init_engagement_creates_compliant_artifacts(tmp_path):
     # legitimate on a brand-new engagement â€” no task touched yet).
     res = bootstrap.check_bootstrap(str(eng), auto_repair=False)
     assert int(res) in (0, 2), "bootstrap must be complete (or REVIEW for pristine PTT) after init"
+
+
+def test_init_engagement_persists_explicit_session_id(tmp_path):
+    eng = tmp_path / "session-bootstrap"
+
+    assert bootstrap.init_engagement(str(eng), session_id="ctf-eu1") == 0
+    assert state.resolve_session_id(eng) == "ctf-eu1"
 
 
 def test_auto_repair_creates_missing_artifacts(tmp_path):
@@ -628,6 +703,7 @@ def test_exploitation_gets_bounded_window_then_requires_ptt_review(monkeypatch, 
         .replace("| PT-042 | [ ] |", "| PT-042 | [~] |"),
         encoding="utf-8",
     )
+    bind_active_task(eng, "ts")
     # Create a real hypothesis (not in comment) for exploitation phase
     recorded = json.loads(
         TOOLS.handle_record_hypothesis(

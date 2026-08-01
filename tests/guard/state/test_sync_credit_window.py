@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from plugins.violin_guard import bootstrap, execution, ptt, service, state
+from plugins.violin_guard import bootstrap, execution, ptt, state
+from plugins.violin_guard import handlers as service
+from tests.guard.receipt_fixture import bind_active_task
 
 
 def _engagement(tmp_path: Path) -> Path:
@@ -22,6 +24,7 @@ def _engagement(tmp_path: Path) -> Path:
         ptt_path.read_text(encoding="utf-8").replace("| PT-010 | [ ] |", "| PT-010 | [~] |"),
         encoding="utf-8",
     )
+    bind_active_task(eng, "test")
     return eng
 
 
@@ -30,6 +33,18 @@ def test_network_clients_are_not_local_bookkeeping() -> None:
     for command in ("curl https://10.10.10.10", "dig 10.10.10.10", "host 10.10.10.10"):
         assert not state.is_local_bookkeeping_command(command)
     assert state.is_local_bookkeeping_command("echo local-note")
+    assert not state.is_local_bookkeeping_command("echo ping > /dev/tcp/10.10.10.10/80")
+    assert not state.is_local_bookkeeping_command("cat < /dev/tcp/10.10.10.10/80")
+
+
+def test_sync_credit_reservation_consumes_and_releases_atomically(tmp_path: Path) -> None:
+    eng = _engagement(tmp_path)
+    before = state.sync_credit_remaining(eng, "recon")
+    reservation = state.reserve_sync_credit(eng, "recon", 2)
+    assert state.sync_credit_remaining(eng, "recon") == before - 2
+    state.consume_reserved_sync_credit(eng, reservation)
+    state.release_reserved_sync_credit(eng, reservation)
+    assert state.sync_credit_remaining(eng, "recon") == before - 1
 
 
 def test_phase_window_runs_without_yolo_then_next_command_blocks(

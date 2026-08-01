@@ -1,5 +1,22 @@
 # Changelog
 
+## 3.0.0
+
+- Made the Windows workflow smoke harness use the repository virtual-environment runtime when available, avoiding false failures from a dependency-free system Python.
+- Made background execution restart-safe by recording PID creation times and deadlines, refusing to signal reused PIDs, recovering matching processes, and marking missing processes as lost; new pending batches now use collision-resistant UUIDs.
+- Made burst execution atomic at admission: every command is preflighted before launch, required sync credit is reserved under one lock, and unused reservations are returned after partial batches.
+- Fixed target extraction for dotted identifiers and direct `/dev/tcp`/`/dev/udp` redirections, and prevented network-capable local-looking commands from bypassing execution accounting.
+- Made interrupted skill preparation recoverable with expiring reservations and stale-owner protection; batch review now remains tied to the delivered execution receipt.
+- Stabilized the core engagement workflow: domain/URL-only scopes now validate, runtime execution cannot substitute another scope file, PTT/review CLI contracts carry skill metadata, and review reuses the active delivered binding.
+- Added receipt-backed skill routing, delivery, task binding, browser enforcement, Kali auto-backend selection, proof-based finding review, and semantic anti-stuck enforcement.
+- Replaced marker-file authorization with two-turn skill preparation and receipt diagnostics; legacy markers can only infer a unique session ID during migration.
+- Allowed direct host-local `init-engagement --host` bootstrapping, persisted runtime session identity before skill delivery, and blocked shell-indirection workarounds.
+- Scoped skill cooldowns to Hermes model API requests so the next tool-loop continuation unlocks automatically, while batch review no longer replaces the active execution-skill binding.
+- Migrated guard tool schemas and parameter validation to Pydantic v2.
+- Replaced platform-specific process termination with cross-platform `psutil` process tree traversal and cleanup.
+- Upgraded target IP/CIDR scope policy arithmetic to `netaddr.IPSet` and RFC 3986 URL parsing to `yarl`.
+- Replaced shell regexes in terminal policy with `bashlex` AST tokenization and command parsing.
+
 ## 2.0.8
 
 - Expanded Duck Store benchmark challenges from 14 to 20 article-parity vulnerabilities, matching Redpick's verified findings across 7 categories with correct severity distribution.

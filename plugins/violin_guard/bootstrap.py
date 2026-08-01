@@ -14,7 +14,7 @@ from pathlib import Path
 import yaml
 
 from .results import GuardResult
-from .state import resolve_eng_dir
+from .state import record_session_id, resolve_eng_dir
 
 __all__ = [
     "init_engagement",
@@ -42,6 +42,7 @@ _ARTIFACT_DIRECTORIES = (
     "evidence/flags",
     "evidence/reporting",
     "evidence/retrospective",
+    "evidence/executions",
 )
 
 
@@ -167,6 +168,7 @@ def init_engagement(
     host = (host or "").strip() or _derive_host(eng_dir)
 
     eng_dir.mkdir(parents=True, exist_ok=True)
+    record_session_id(eng_dir, session_id)
     for rel in _ARTIFACT_DIRECTORIES:
         (eng_dir / rel).mkdir(parents=True, exist_ok=True)
     for rel, (template_rel, placeholder) in _REPAIR_TEMPLATES.items():
@@ -180,10 +182,6 @@ def init_engagement(
         scope_path = eng_dir / "scope" / "scope.yaml"
         scope_path.write_text(yaml.safe_dump(_ctf_scope(host), sort_keys=False), encoding="utf-8")
         result.add_info("wrote CTF scope")
-        if session_id:
-            marker = eng_dir / "state" / f".skill-loaded-{session_id}"
-            marker.write_text("skill-loaded: ctf bootstrap\n", encoding="utf-8")
-            result.add_info(f"marked skill loaded for session {session_id}")
 
     if result.errors or result.warnings:
         result.add_error("init-engagement produced an incomplete or non-compliant engagement")

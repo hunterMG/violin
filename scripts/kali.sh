@@ -17,7 +17,7 @@
 #
 # If the container isn't running, starts it automatically.
 
-CONTAINER_NAME="kali-pentest"
+CONTAINER_NAME="${VIOLIN_KALI_CONTAINER:-kali-pentest}"
 
 # Ensure container is running
 docker start "$CONTAINER_NAME" > /dev/null 2>&1 || true
